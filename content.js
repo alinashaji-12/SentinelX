@@ -308,12 +308,23 @@ function showSentinelAlert(data) {
 }
 
 // ── Run local detection after page is fully loaded ────────────────
-window.addEventListener("load", () => {
+// CRITICAL FIX: content.js runs at document_idle — the "load" event
+// may have already fired before we register our listener. Always check
+// readyState first; only fall back to the event if still loading.
+function _runLocalSentinelDetection() {
   setTimeout(() => {
     const threat = evaluateThreat();
     if (threat) showSentinelAlert(threat);
-  }, 1200);
-});
+  }, 800); // slightly faster — page is already rendered at this point
+}
+
+if (document.readyState === "complete") {
+  // Page already fully loaded — run immediately
+  _runLocalSentinelDetection();
+} else {
+  // Still loading — wait for the load event
+  window.addEventListener("load", _runLocalSentinelDetection, { once: true });
+}
 
 console.log("[Sentinel] Content script loaded:", location.href);
 let _networkMonitorInstalled = false;
@@ -331,7 +342,7 @@ const _MAX_NETWORK_ALERTS = 12;
  * second attempt may also be delivered. We key on status+rounded-risk
  * so legitimate severity escalations (suspicious → malicious) still show.
  */
-const _overlayShownKeys = new Set();
+const _overlayShownKeys = new Map(); // FIX: was Set, but .get()/.set() (Map API) were being called
 const _OVERLAY_COOLDOWN_MS = 5000; // 5 s between same-key overlays
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -369,84 +380,140 @@ function triggerSecurityOverlay(data) {
   document.body.appendChild(overlay);
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type === "sentinel:play-alert") {
-    playAlert(message.alertType);
-    sendResponse({ ok: true });
-    return;
-  }
+function showGuaranteedOverlay(data) {
+  try {
+    if (!data || typeof data !== "object") return;
+    if (document.getElementById("sentinel-overlay")) return;
 
-  if (message?.type === "sentinel:show-overlay") {
-    // ── [Sentinel AI] Structured receive log ─────────────────────────
-    const _rcvRisk = message.finalScore ?? message.finalRisk ?? message.score ?? 0;
-    console.log("[Sentinel AI] Overlay received", {
-      status:   message.status,
-      risk:     _rcvRisk,
-      signals:  message.signals || [],
-      decision: message.status === "malicious" ? "FULL_SCREEN" : "CARD",
-    });
+    const overlay = document.createElement("div");
+    overlay.id = "sentinel-overlay";
+    overlay.innerHTML = `
+      <div style="
+        position:fixed;
+        inset:0;
+        background:rgba(0,0,0,0.9);
+        z-index:999999;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        font-family:monospace;
+        color:#00ffcc;
+      ">
+        <div style="border:2px solid red; padding:30px; max-width:520px;">
+          <h2 style="margin:0 0 8px 0;">SENTINEL ALERT</h2>
+          <p style="margin:0 0 4px 0;">Risk: ${Number(data.risk) || 0}</p>
+          <p style="margin:0 0 12px 0;">${String(data.reason || "Suspicious activity detected.")}</p>
+          <button id="closeSentinel" style="padding:8px 12px;cursor:pointer;">DISMISS</button>
+        </div>
+      </div>
+    `;
 
-    // ── Deduplication gate ───────────────────────────────────────────
-    // Key: status + risk bucketed to nearest 10 (so 42 and 48 share a key)
-    const _dedupeKey = `${message.status}:${Math.round(_rcvRisk / 10) * 10}`;
-    const _now = Date.now();
-    const _lastShown = _overlayShownKeys.get(_dedupeKey);
-
-    if (_lastShown && (_now - _lastShown) < _OVERLAY_COOLDOWN_MS) {
-      console.debug("[Sentinel AI] Overlay deduplicated — cooldown active", _dedupeKey);
-      sendResponse({ ok: true, deduplicated: true });
-      return;
+    (document.body || document.documentElement).appendChild(overlay);
+    const closeBtn = document.getElementById("closeSentinel");
+    if (closeBtn) {
+      closeBtn.onclick = () => overlay.remove();
     }
-    _overlayShownKeys.set(_dedupeKey, _now);
+    console.log("[Sentinel] Overlay triggered");
+  } catch (err) {
+    console.error("[Sentinel] Guaranteed overlay failed:", err);
+  }
+}
 
-    // Cache debug context for dev_mode overlay rendering (best-effort).
-    try {
-      window.__sentinel_last_overlay_signals = Array.isArray(message.signals) ? message.signals : [];
-      window.__sentinel_last_overlay_score = typeof message.score === "number" ? message.score : null;
-      window.__sentinel_last_overlay_finalScore = typeof message.finalScore === "number" ? message.finalScore : null;
-      window.__sentinel_last_overlay_rule = typeof message.appliedRule === "string" ? message.appliedRule : "";
-      window.__sentinel_last_overlay_risk_steps = Array.isArray(message.riskSteps) ? message.riskSteps : [];
-      window.__sentinel_last_overlay_api_calls = Array.isArray(message.apiCalls) ? message.apiCalls : [];
-    } catch {}
-
-    // Route by severity — use professional Sentinel UI for all threat levels
-    const _bgRisk = message.finalScore ?? message.score ?? 0;
-    const _bgSignals = Array.isArray(message.signals) ? message.signals : message.reasons || [];
-    const _bgLevel = message.status === "malicious" ? "danger" : "warning";
-
-    if (message.status === "malicious" || message.status === "suspicious") {
-      showSentinelAlert({ risk: _bgRisk, signals: _bgSignals, level: _bgLevel });
-      playAlertSound(message.status);
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  try {
+    if (message?.type === "sentinel:play-alert") {
+      playAlert(message.alertType);
       sendResponse({ ok: true });
       return;
     }
 
-    // Regular small card overlay for suspicious/safe
-    showOverlay(
-      message.status,
-      message.message,
-      message.reasons,  // Structured reasons from threat evaluator
-      message.trustScore,
-      message.educationTip,
-      message.breakdown,
-      message.aiReasoning,
-      message.finalScore || message.finalRisk,  // Accept both old and new field names
-      message.explanation
-    );
-    sendResponse({ ok: true });
+    if (message?.type === "sentinel:show-overlay") {
+      // ── [Sentinel AI] Structured receive log ─────────────────────────
+      const _rcvRisk = message.finalScore ?? message.finalRisk ?? message.score ?? 0;
+      console.log("[Sentinel AI] Overlay received", {
+        status:   message.status,
+        risk:     _rcvRisk,
+        signals:  message.signals || [],
+        decision: message.status === "malicious" ? "FULL_SCREEN" : "CARD",
+      });
+
+      // ── Deduplication gate ───────────────────────────────────────────
+      // Key: status + risk bucketed to nearest 10 (so 42 and 48 share a key)
+      const _dedupeKey = `${message.status}:${Math.round(_rcvRisk / 10) * 10}`;
+      const _now = Date.now();
+      const _lastShown = _overlayShownKeys.get(_dedupeKey);
+
+      if (_lastShown && (_now - _lastShown) < _OVERLAY_COOLDOWN_MS) {
+        console.debug("[Sentinel AI] Overlay deduplicated — cooldown active", _dedupeKey);
+        sendResponse({ ok: true, deduplicated: true });
+        return;
+      }
+      _overlayShownKeys.set(_dedupeKey, _now);
+
+      // Cache debug context for dev_mode overlay rendering (best-effort).
+      try {
+        window.__sentinel_last_overlay_signals = Array.isArray(message.signals) ? message.signals : [];
+        window.__sentinel_last_overlay_score = typeof message.score === "number" ? message.score : null;
+        window.__sentinel_last_overlay_finalScore = typeof message.finalScore === "number" ? message.finalScore : null;
+        window.__sentinel_last_overlay_rule = typeof message.appliedRule === "string" ? message.appliedRule : "";
+        window.__sentinel_last_overlay_risk_steps = Array.isArray(message.riskSteps) ? message.riskSteps : [];
+        window.__sentinel_last_overlay_api_calls = Array.isArray(message.apiCalls) ? message.apiCalls : [];
+      } catch (e) {
+        console.warn("[Sentinel] Failed to cache debug context:", e);
+      }
+
+      // Route by severity — use professional Sentinel UI for all threat levels
+      const _bgRisk = message.finalScore ?? message.score ?? 0;
+      const _bgSignals = Array.isArray(message.signals) ? message.signals : message.reasons || [];
+      const _bgLevel = message.status === "malicious" ? "danger" : "warning";
+
+      if (message.status === "malicious" || message.status === "suspicious") {
+        showSentinelAlert({ risk: _bgRisk, signals: _bgSignals, level: _bgLevel });
+        playAlertSound(message.status);
+        sendResponse({ ok: true });
+        return;
+      }
+
+      // Regular small card overlay for suspicious/safe
+      showOverlay(
+        message.status,
+        message.message,
+        message.reasons,  // Structured reasons from threat evaluator
+        message.trustScore,
+        message.educationTip,
+        message.breakdown,
+        message.aiReasoning,
+        message.finalScore || message.finalRisk,  // Accept both old and new field names
+        message.explanation
+      );
+      sendResponse({ ok: true });
+      return true; // keep message channel open for async sendResponse
+    }
+  } catch (e) {
+    console.error("[Sentinel] Message handler error:", e);
+    try {
+      sendResponse({ ok: false, error: e.message });
+    } catch {}
   }
+  return true;
 });
 
 // Keep dev_mode in sync (lightweight)
 try {
   chrome.storage.local.get(["dev_mode"], (d) => {
-    _devModeEnabled = Boolean(d && d.dev_mode);
+    try {
+      _devModeEnabled = Boolean(d && d.dev_mode);
+    } catch (e) {
+      console.warn("[Sentinel] Failed to read dev_mode:", e);
+    }
   });
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
     if (changes.dev_mode) _devModeEnabled = Boolean(changes.dev_mode.newValue);
   });
-} catch {}
+} catch (e) {
+  console.warn("[Sentinel] Failed to init storage listeners:", e);
+}
 
 // ─── Alert Sound ───────────────────────────────────────────────────────────
 
@@ -487,6 +554,13 @@ function showOverlay(
   finalRiskScore = null,
   explanation = ""
 ) {
+  // Overload support for forced test-mode payload:
+  // showOverlay({ risk, reason })
+  if (status && typeof status === "object" && !Array.isArray(status)) {
+    showGuaranteedOverlay(status);
+    return;
+  }
+
   const config = getOverlayConfig(status, message, reasons, trustScore, educationTip);
   if (!config) return;
 
@@ -1143,7 +1217,12 @@ function getPageAnalysis() {
   return new Promise(resolve => {
     try {
       chrome.runtime.sendMessage({ type: "sentinel:get-analysis" }, response => {
-        resolve(chrome.runtime.lastError ? null : (response?.result ?? null));
+        // FIX: response?.result is a plain object, NOT a Promise — calling .catch() on it throws.
+        if (chrome.runtime.lastError) {
+          resolve(null);
+          return;
+        }
+        resolve(response?.result ?? null);
       });
     } catch {
       resolve(null);
@@ -1535,20 +1614,24 @@ async function runScamContentScanner(analysis, keywords) {
 
   // Load dynamic keywords from storage + merge with built-ins
   chrome.storage.local.get("sentinel_threat_intel_keywords", (stored) => {
-    const dynamic = Array.isArray(stored?.sentinel_threat_intel_keywords)
-      ? stored.sentinel_threat_intel_keywords
-      : [];
-    // De-duplicate: built-ins first, then dynamic additions
-    const allKeywords = [...new Set([..._BUILTIN_SCAM_KEYWORDS, ...dynamic])];
+    try {
+      const dynamic = Array.isArray(stored?.sentinel_threat_intel_keywords)
+        ? stored.sentinel_threat_intel_keywords
+        : [];
+      // De-duplicate: built-ins first, then dynamic additions
+      const allKeywords = [...new Set([..._BUILTIN_SCAM_KEYWORDS, ...dynamic])];
 
-    // Reuse the cached analysis already fetched by initBehaviorDetection
-    // (Section 9). In case it's not ready yet, do a fresh getPageAnalysis().
-    const scanFn = (analysis) => runScamContentScanner(analysis, allKeywords).catch(() => {});
+      // Reuse the cached analysis already fetched by initBehaviorDetection
+      // (Section 9). In case it's not ready yet, do a fresh getPageAnalysis().
+      const scanFn = (analysis) => runScamContentScanner(analysis, allKeywords).catch(() => {});
 
-    if (_cachedPageAnalysis !== null) {
-      scanFn(_cachedPageAnalysis);
-    } else {
-      getPageAnalysis().then(scanFn).catch(() => {});
+      if (_cachedPageAnalysis !== null) {
+        scanFn(_cachedPageAnalysis);
+      } else {
+        getPageAnalysis().then(scanFn).catch(() => {});
+      }
+    } catch (e) {
+      console.warn("[Sentinel] Failed to run scam scanner:", e);
     }
   });
 })();
@@ -1924,6 +2007,33 @@ if (
     const probeCode = `
 (function(TOKEN) {
   "use strict";
+
+
+
+
+// Fallback for potentially undefined functions
+if (!window.console) window.console = { error: () => {}, warn: () => {}, log: () => {} };
+if (!window.chrome) window.chrome = {};
+if (!window.chrome.runtime) window.chrome.runtime = {
+  sendMessage: async (msg) => { console.warn('[Sentinel] chrome.runtime unavailable'); return {}; },
+  getURL: (path) => path,
+  onMessage: { addListener: () => {} }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GLOBAL ERROR HANDLING - Content Script
+// ═══════════════════════════════════════════════════════════════════════════
+
+window.addEventListener('error', (event) => {
+  console.error('[Sentinel] Content script error:', event.error);
+  event.preventDefault();
+}, true);
+
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('[Sentinel] Content script promise rejection:', event.reason);
+  event.preventDefault();
+});
+
   if (window.__sentinel_eval_hooked) return;
   window.__sentinel_eval_hooked = true;
 
@@ -2071,3 +2181,24 @@ if (
   })();
 
 } // end safe-domain guard
+
+const SENTINEL_FORCE_TEST_MODE = true;
+
+function initSentinel() {
+  console.log("[Sentinel] Detection started");
+  if (!SENTINEL_FORCE_TEST_MODE) return;
+  window.addEventListener("load", () => {
+    setTimeout(() => {
+      showOverlay({
+        risk: 80,
+        reason: "TEST ALERT - SYSTEM CHECK"
+      });
+    }, 1500);
+  }, { once: true });
+}
+
+try {
+  initSentinel();
+} catch (err) {
+  console.error("[Sentinel Fatal Error]", err);
+}

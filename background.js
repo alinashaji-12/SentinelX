@@ -633,7 +633,19 @@ function applySignalDecay(signals) {
  * @returns {boolean} true if signals are sufficiently correlated
  */
 function hasCorrelation(signals) {
-  return true; // TEST MODE
+  const list = Array.isArray(signals) ? signals : [];
+  if (list.length >= 2) return true;
+
+  const onlySignal = list[0];
+  if (!onlySignal) return false;
+
+  if (typeof onlySignal === "string") {
+    return /dataset|threat|malware|phishing|credential|password|login|ssl|iframe|insecure/i.test(onlySignal);
+  }
+
+  const weight = Number(onlySignal.weight ?? onlySignal.score ?? 0);
+  const confidence = Number(onlySignal.confidence ?? 0);
+  return weight >= 0.7 || confidence >= 0.8;
 }
 
 /**
@@ -648,7 +660,16 @@ function hasCorrelation(signals) {
  * @returns {boolean}
  */
 function shouldTriggerAlert(result) {
-  return true; // TEST MODE
+  if (!result) return false;
+  if (result.status === "malicious") return true;
+
+  const risk = Number(result.finalRiskScore ?? result.finalRisk ?? result.risk ?? result.score ?? 0);
+  const signals = Array.isArray(result.signals) ? result.signals : [];
+  const confidence = Number(result.confidence ?? result.scoreConfidence ?? 1);
+
+  if (risk >= 50) return true;
+  if (risk >= 25 && signals.length > 0 && confidence >= 0.5) return true;
+  return false;
 }
 
 /**
@@ -661,7 +682,13 @@ function shouldTriggerAlert(result) {
  * @returns {boolean} true if alert should be suppressed due to trust
  */
 function isTrustAwareSuppressed(result) {
-  return false; // TEST MODE
+  if (!result || result.status === "malicious") return false;
+
+  const risk = Number(result.finalRiskScore ?? result.finalRisk ?? result.risk ?? result.score ?? 0);
+  const trustTier = String(result.trustTier ?? result.trustLevel ?? "").toLowerCase();
+  const trustScore = Number(result.trustScore ?? 0);
+
+  return (trustTier === "high" || trustScore >= 80) && risk < 50;
 }
 
 /**
@@ -682,7 +709,7 @@ const ALERT_COOLDOWN = {
  * @returns {boolean}
  */
 function isCooldownActive() {
-  return false; // TEST MODE - Cooldown disabled
+  return Date.now() - ALERT_COOLDOWN.lastAlertTime < ALERT_COOLDOWN.COOLDOWN_MS;
 }
 
 /**
@@ -1827,61 +1854,136 @@ chrome.webNavigation.onCompleted.addListener((details) => {
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || typeof message.type !== "string") return false;
+  try {
+    if (!message || typeof message.type !== "string") return false;
 
-  switch (message.type) {
+    switch (message.type) {
 
-    case "sentinel:bypass-url": {
-      if (!message.url) { sendResponse({ ok: false, error: "No URL" }); return true; }
+      case "sentinel:bypass-url": {
+        if (!message.url) { sendResponse({ ok: false, error: "No URL" }); return true; }
 
-      // v3.0: Update user profile + reputation concurrently with bypass registration
-      const bypassUrl = message.url;
-      let bypassHostname = "";
-      try { bypassHostname = new URL(bypassUrl).hostname; } catch {}
+        try {
+          // v3.0: Update user profile + reputation concurrently with bypass registration
+          const bypassUrl = message.url;
+          let bypassHostname = "";
+          try { bypassHostname = new URL(bypassUrl).hostname; } catch {}
 
-      const adaptiveEng = globalThis.SentinelAdaptiveEngine;
+          const adaptiveEng = globalThis && globalThis.SentinelAdaptiveEngine;
 
-      registerBypass(bypassUrl)
-        .then(() => {
-          // Non-blocking: update user behavior profile and domain reputation
-          if (adaptiveEng && bypassHostname) {
-            adaptiveEng.updateUserProfile(bypassHostname, "bypass").catch(() => {});
-            adaptiveEng.updateDomainReputationV3(bypassHostname, "bypass").catch(() => {});
-          }
-          sendResponse({ ok: true });
-        })
-        .catch(e => sendResponse({ ok: false, error: e.message }));
-      return true;
-    }
+          registerBypass(bypassUrl)
+            .then(() => {
+              try {
+                // Non-blocking: update user behavior profile and domain reputation
+                if (adaptiveEng && bypassHostname && typeof adaptiveEng.updateUserProfile === "function") {
+                  adaptiveEng.updateUserProfile(bypassHostname, "bypass").catch(() => {});
+                }
+                if (adaptiveEng && bypassHostname && typeof adaptiveEng.updateDomainReputationV3 === "function") {
+                  adaptiveEng.updateDomainReputationV3(bypassHostname, "bypass").catch(() => {});
+                }
+              } catch (e) {
+                console.warn("[Sentinel] Adaptive update failed:", e);
+              }
+              sendResponse({ ok: true });
+            })
+            .catch(e => {
+              console.error("[Sentinel] Bypass registration failed:", e);
+              sendResponse({ ok: false, error: e?.message || "Bypass failed" });
+            });
+        } catch (e) {
+          console.error("[Sentinel] Bypass handler error:", e);
+          sendResponse({ ok: false, error: e?.message || "Unknown error" });
+        }
+        return true;
+      }
 
-    case "sentinel:get-analysis": {
-      storageGet([CONFIG.KEYS.LAST_ANALYSIS])
-        .then(data => sendResponse({ result: data[CONFIG.KEYS.LAST_ANALYSIS] || null }))
-        .catch(e => sendResponse({ result: null, error: e.message }));
-      return true;
-    }
+      case "sentinel:get-analysis": {
+        try {
+          storageGet([CONFIG.KEYS.LAST_ANALYSIS])
+            .then(data => {
+              try {
+                sendResponse({ result: (data && data[CONFIG.KEYS.LAST_ANALYSIS]) || null });
+              } catch (e) {
+                console.error("[Sentinel] Error in get-analysis response:", e);
+                sendResponse({ result: null, error: "Response failed" });
+              }
+            })
+            .catch(e => {
+              console.error("[Sentinel] get-analysis failed:", e);
+              sendResponse({ result: null, error: e?.message || "Storage read failed" });
+            });
+        } catch (e) {
+          console.error("[Sentinel] get-analysis handler error:", e);
+          sendResponse({ result: null, error: e?.message || "Unknown error" });
+        }
+        return true;
+      }
 
-    case "sentinel:get-history": {
-      storageGet([CONFIG.KEYS.HISTORY])
-        .then(data => sendResponse({ history: data[CONFIG.KEYS.HISTORY] || [] }))
-        .catch(e => sendResponse({ history: [], error: e.message }));
-      return true;
-    }
+      case "sentinel:get-history": {
+        try {
+          storageGet([CONFIG.KEYS.HISTORY])
+            .then(data => {
+              try {
+                sendResponse({ history: (data && data[CONFIG.KEYS.HISTORY]) || [] });
+              } catch (e) {
+                console.error("[Sentinel] Error in get-history response:", e);
+                sendResponse({ history: [], error: "Response failed" });
+              }
+            })
+            .catch(e => {
+              console.error("[Sentinel] get-history failed:", e);
+              sendResponse({ history: [], error: e?.message || "Storage read failed" });
+            });
+        } catch (e) {
+          console.error("[Sentinel] get-history handler error:", e);
+          sendResponse({ history: [], error: e?.message || "Unknown error" });
+        }
+        return true;
+      }
 
-    case "sentinel:get-reputation": {
-      storageGet([CONFIG.KEYS.REPUTATION])
-        .then(data => sendResponse({ reputation: data[CONFIG.KEYS.REPUTATION] || {} }))
-        .catch(e => sendResponse({ reputation: {}, error: e.message }));
-      return true;
-    }
+      case "sentinel:get-reputation": {
+        try {
+          storageGet([CONFIG.KEYS.REPUTATION])
+            .then(data => {
+              try {
+                sendResponse({ reputation: (data && data[CONFIG.KEYS.REPUTATION]) || {} });
+              } catch (e) {
+                console.error("[Sentinel] Error in get-reputation response:", e);
+                sendResponse({ reputation: {}, error: "Response failed" });
+              }
+            })
+            .catch(e => {
+              console.error("[Sentinel] get-reputation failed:", e);
+              sendResponse({ reputation: {}, error: e?.message || "Storage read failed" });
+            });
+        } catch (e) {
+          console.error("[Sentinel] get-reputation handler error:", e);
+          sendResponse({ reputation: {}, error: e?.message || "Unknown error" });
+        }
+        return true;
+      }
 
-    case "sentinel:get-user-profile": {
-      // Returns the full sentinel_user_profile for the dashboard
-      storageGet([CONFIG.KEYS.USER_PROFILE])
-        .then(data => sendResponse({ profile: data[CONFIG.KEYS.USER_PROFILE] || null }))
-        .catch(e => sendResponse({ profile: null, error: e.message }));
-      return true;
-    }
+      case "sentinel:get-user-profile": {
+        try {
+          // Returns the full sentinel_user_profile for the dashboard
+          storageGet([CONFIG.KEYS.USER_PROFILE])
+            .then(data => {
+              try {
+                sendResponse({ profile: (data && data[CONFIG.KEYS.USER_PROFILE]) || null });
+              } catch (e) {
+                console.error("[Sentinel] Error in get-user-profile response:", e);
+                sendResponse({ profile: null, error: "Response failed" });
+              }
+            })
+            .catch(e => {
+              console.error("[Sentinel] get-user-profile failed:", e);
+              sendResponse({ profile: null, error: e?.message || "Storage read failed" });
+            });
+        } catch (e) {
+          console.error("[Sentinel] get-user-profile handler error:", e);
+          sendResponse({ profile: null, error: e?.message || "Unknown error" });
+        }
+        return true;
+      }
 
     case "sentinel:get-adaptive-stats": {
       // Returns combined analytics snapshot (reputation + user profile summary)
