@@ -31,6 +31,8 @@
 
 "use strict";
 
+const SENTINEL_FORCE_TEST_MODE = true;
+
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SECTION 1 â€” LOAD DETECTION ENGINE
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -727,33 +729,32 @@ function isCooldownActive() {
  */
 function shouldShowAlert(result) {
   if (!result) return false;
-  
-  // Rule 1: Cooldown check
-  if (isCooldownActive()) {
-    console.log("[Sentinel-AdaptiveGating] â± Alert suppressed: cooldown active");
-    return false;
+
+  // TEMP TEST MODE:
+  // Disable cooldown/trust suppression/correlation gating so overlay flow
+  // can be validated end-to-end without blockers.
+  if (SENTINEL_FORCE_TEST_MODE) {
+    const shouldTriggerForced = shouldTriggerAlert(result);
+    if (!shouldTriggerForced) {
+      console.log("[Sentinel-AdaptiveGating] Test mode: not triggered");
+      return false;
+    }
+    ALERT_COOLDOWN.lastAlertTime = Date.now();
+    console.log("[Sentinel-AdaptiveGating] Test mode: alert approved");
+    return true;
   }
-  
-  // Rule 2: Trigger evaluation
+
+  // Rule 1: Trigger evaluation
   const shouldTrigger = shouldTriggerAlert(result);
   if (!shouldTrigger) {
     console.log("[Sentinel-AdaptiveGating] ðŸ“Š Alert not triggered: insufficient risk/signals");
     return false;
   }
-  
-  // Rule 3: Trust-aware suppression
-  if (isTrustAwareSuppressed(result)) {
-    console.log("[Sentinel-AdaptiveGating] ðŸ† Alert suppressed: high trust domain");
-    return false;
-  }
-  
-  // Rule 4: Correlation requirement
-  if (!hasCorrelation(result.signals)) {
-    console.log("[Sentinel-AdaptiveGating] ðŸ”— Alert suppressed: isolated signal (low correlation)");
-    return false;
-  }
-  
-  // Rule 5: All checks passed â†’ show alert and record time
+
+  // Rule 2: Correlation requirement
+  if (!hasCorrelation(result.signals)) return false;
+
+  // Rule 3: All checks passed
   ALERT_COOLDOWN.lastAlertTime = Date.now();
   console.log("[Sentinel-AdaptiveGating] âœ… Alert APPROVED");
   return true;
@@ -1793,7 +1794,7 @@ chrome.webNavigation.onCompleted.addListener((details) => {
   // â”€â”€ Risk floor gate: skip overlay for genuinely low-risk pages â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Malicious always shows (redirected to warning.html above, but defence-in-depth).
   // Suspicious/safe need risk >= 40 to justify IPC cost and user disruption.
-  if (!isMalicious && displayRisk < 40) {
+  if (!SENTINEL_FORCE_TEST_MODE && !isMalicious && displayRisk < 40) {
     console.log("[Sentinel AI] Overlay skipped â€” risk below threshold", displayRisk, "/ 40");
     return;
   }
@@ -2289,6 +2290,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     default:
       return false;
   }
+} catch (e) {
+  console.error("[Sentinel] Message handler error:", e);
+  try {
+    sendResponse({ ok: false, error: e?.message || "Handler error" });
+  } catch {}
+}
 });
 
 
@@ -2384,7 +2391,15 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 
 // Load threat intel immediately on first SW initialization
-loadThreatIntelDB();
+function initSentinel() {
+  console.log("[Sentinel] Detection started");
+  loadThreatIntelDB();
+  console.log("[Sentinel] Service worker initialized");
+}
 
-console.log("[Sentinel] âœ… Service worker initialized v3.0.0 â€” Adaptive Intelligence Active");
+try {
+  initSentinel();
+} catch (err) {
+  console.error("[Sentinel Fatal Error]", err);
+}
 
