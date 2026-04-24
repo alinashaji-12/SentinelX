@@ -1,4 +1,4 @@
-﻿/**
+/**
  * background.js â€” Sentinel Browse Extension v2.0 (MV3 Service Worker)
  *
  * PRODUCTION-GRADE ARCHITECTURE
@@ -633,18 +633,7 @@ function applySignalDecay(signals) {
  * @returns {boolean} true if signals are sufficiently correlated
  */
 function hasCorrelation(signals) {
-  if (!Array.isArray(signals) || signals.length === 0) {
-    return false; // No signals = no correlation
-  }
-  
-  if (signals.length >= 2) {
-    return true; // Multiple signals = inherent correlation
-  }
-  
-  // Single signal: check if it's high-confidence enough
-  const signal = signals[0];
-  const baseWeight = SIGNAL_WEIGHTS[signal.type] || SIGNAL_WEIGHTS._default;
-  return baseWeight >= 0.7;
+  return true; // TEST MODE
 }
 
 /**
@@ -659,17 +648,7 @@ function hasCorrelation(signals) {
  * @returns {boolean}
  */
 function shouldTriggerAlert(result) {
-  if (!result) return false;
-  
-  const highRisk = (result.finalRiskScore || result.risk || 0) >= 70;
-  const mediumRisk = (result.finalRiskScore || result.risk || 0) >= 40;
-  const strongSignals = Array.isArray(result.signals) && result.signals.length >= 2;
-  const highConfidence = (result.aiConfidence || result.confidence || 0) >= 0.7;
-  
-  return (
-    highRisk ||
-    (mediumRisk && strongSignals && highConfidence)
-  );
+  return true; // TEST MODE
 }
 
 /**
@@ -682,12 +661,7 @@ function shouldTriggerAlert(result) {
  * @returns {boolean} true if alert should be suppressed due to trust
  */
 function isTrustAwareSuppressed(result) {
-  if (!result) return false;
-  
-  const trustTier = result.trustTier || "medium";
-  const riskScore = result.finalRiskScore || result.risk || 0;
-  
-  return (trustTier === "high" && riskScore < 60);
+  return false; // TEST MODE
 }
 
 /**
@@ -708,7 +682,7 @@ const ALERT_COOLDOWN = {
  * @returns {boolean}
  */
 function isCooldownActive() {
-  return Date.now() - ALERT_COOLDOWN.lastAlertTime < ALERT_COOLDOWN.COOLDOWN_MS;
+  return false; // TEST MODE - Cooldown disabled
 }
 
 /**

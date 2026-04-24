@@ -1413,6 +1413,17 @@ function analyzeUrl(rawUrl) {
       return buildResult("safe", 0, [], [], "NO_HOSTNAME", {});
     }
 
+    // 🧠 TEST MODE - FORCED ALERT
+    if (true) {
+      return buildResult(
+        "malicious", 85,
+        ["TEST MODE - FORCED ALERT"],
+        ["test_signal"],
+        "TEST_MODE",
+        { hasIntent: true, isThreatIntel: true }
+      );
+    }
+
     const rootDomain = getRootDomain(hostname);
 
     // ── Pipeline Step 2: Trusted domain check (BEFORE scoring) ───────────

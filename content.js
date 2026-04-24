@@ -11,6 +11,311 @@ let hasPlayedAlertForPage = false;
 let overlayElement = null;
 let overlayHideTimeoutId = null;
 let _devModeEnabled = false;
+
+console.log("[Sentinel] Content script ACTIVE on:", location.href);
+
+// ══════════════════════════════════════════════════════════════════
+// REAL-TIME LOCAL DETECTION ENGINE (content-side)
+// ══════════════════════════════════════════════════════════════════
+
+const _SENTINEL_TRUSTED = new Set([
+  "google.com", "youtube.com", "github.com", "microsoft.com",
+  "apple.com", "amazon.com", "stackoverflow.com", "mozilla.org",
+  "wikipedia.org", "linkedin.com", "twitter.com", "x.com",
+  "reddit.com", "openai.com", "chatgpt.com", "cloudflare.com",
+  "netflix.com", "instagram.com", "facebook.com", "bing.com",
+  "yahoo.com", "duckduckgo.com", "office.com", "live.com",
+]);
+
+function _sentinelRootDomain(hostname) {
+  const parts = (hostname || "").replace(/^www\./, "").split(".").filter(Boolean);
+  return parts.length >= 2 ? parts.slice(-2).join(".") : hostname;
+}
+
+function evaluateThreat() {
+  let risk = 0;
+  const signals = [];
+  const hostname = location.hostname.toLowerCase();
+  const rootDomain = _sentinelRootDomain(hostname);
+  const isTrusted = _SENTINEL_TRUSTED.has(rootDomain) || _SENTINEL_TRUSTED.has(hostname);
+
+  // ── Signal 1: Insecure connection ────────────────────────────────
+  if (location.protocol !== "https:") {
+    risk += 40;
+    signals.push("insecure_connection");
+  }
+
+  // ── Signal 2: Password / login form ──────────────────────────────
+  if (document.querySelector("input[type='password']")) {
+    risk += 25;
+    signals.push("login_form_detected");
+  }
+
+  // ── Signal 3: External cross-origin iframe ────────────────────────
+  const iframes = Array.from(document.querySelectorAll("iframe"));
+  const hasExtIframe = iframes.some(f => {
+    try { return f.src && !new URL(f.src).hostname.endsWith(hostname); } catch { return false; }
+  });
+  if (hasExtIframe) {
+    risk += 20;
+    signals.push("external_iframe");
+  }
+
+  // ── Trust modifier: reduce risk 30% for known-safe domains ───────
+  if (isTrusted) {
+    risk = Math.round(risk * 0.7);
+  }
+
+  console.log("[Sentinel] Risk Score:", risk);
+  console.log("[Sentinel] Signals:", signals);
+
+  if (isTrusted && risk < 50) {
+    console.log("[Sentinel] Decision: IGNORE (trusted domain)");
+    return null;
+  }
+  if (risk >= 50) {
+    console.log("[Sentinel] Decision: SHOW — danger");
+    return { risk, signals, level: "danger" };
+  }
+  if (risk >= 25) {
+    console.log("[Sentinel] Decision: SHOW — warning");
+    return { risk, signals, level: "warning" };
+  }
+  console.log("[Sentinel] Decision: IGNORE");
+  return null;
+}
+
+// ══════════════════════════════════════════════════════════════════
+// PROFESSIONAL CYBER UI OVERLAY
+// ══════════════════════════════════════════════════════════════════
+
+function showSentinelAlert(data) {
+  if (!data) return;
+  if (document.getElementById("sentinel-security-overlay")) return;
+
+  const { risk, signals, level } = data;
+  const domain    = location.hostname || "unknown";
+  const isSecure  = location.protocol === "https:";
+
+  // ── Colour palette per severity ──────────────────────────────────
+  const threatColor  = level === "danger" ? "#ff1a1a" : "#ff9500";
+  const glowColor    = level === "danger" ? "rgba(255,26,26,0.6)"  : "rgba(255,149,0,0.5)";
+  const threatLabel  = level === "danger" ? "HIGH RISK" : "MEDIUM RISK";
+
+  // ── SSL tri-state indicator ───────────────────────────────────────
+  let connLabel, sslIcon, sslColor;
+  if (isSecure && level !== "danger") {
+    sslIcon = "🔒"; sslColor = "#00ff88";
+    connLabel = `<span style='color:${sslColor};font-weight:700;'>${sslIcon} SECURE (HTTPS)</span>`;
+  } else if (!isSecure && level === "danger") {
+    sslIcon = "❌"; sslColor = "#ff1a1a";
+    connLabel = `<span style='color:${sslColor};font-weight:700;'>${sslIcon} HIGH RISK — NO ENCRYPTION</span>`;
+  } else {
+    sslIcon = "⚠"; sslColor = "#ff9500";
+    connLabel = `<span style='color:${sslColor};font-weight:700;'>${sslIcon} NOT SECURE (HTTP)</span>`;
+  }
+
+  // ── Signals list HTML ────────────────────────────────────────────
+  const signalsHtml = signals.length
+    ? signals.map(s =>
+        `<li style="margin:6px 0;color:#cbd5e1;display:flex;align-items:center;gap:8px;">
+           <span style="color:${threatColor};font-size:10px;">▶</span>
+           ${s.replace(/_/g, " ").toUpperCase()}
+         </li>`
+      ).join("")
+    : `<li style="color:#475569;">No specific signals detected</li>`;
+
+  // ── Inject keyframe CSS once per page ────────────────────────────
+  if (!document.getElementById("sentinel-styles-v3")) {
+    const st = document.createElement("style");
+    st.id = "sentinel-styles-v3";
+    st.textContent = `
+      @keyframes _sv3-fadein  { from{opacity:0;transform:translateY(12px) scale(.97)} to{opacity:1;transform:translateY(0) scale(1)} }
+      @keyframes _sv3-pulse   {
+        0%,100% { box-shadow:0 0 18px ${glowColor},0 0 36px ${glowColor},inset 0 0 12px rgba(0,0,0,0.6); }
+        50%      { box-shadow:0 0 40px ${glowColor},0 0 80px ${glowColor},inset 0 0 20px rgba(0,0,0,0.4); }
+      }
+      @keyframes _sv3-shake   { 0%,100%{transform:translateX(0)} 20%,60%{transform:translateX(-6px)} 40%,80%{transform:translateX(6px)} }
+      @keyframes _sv3-scanline { 0%{transform:translateY(-100%)} 100%{transform:translateY(100vh)} }
+      @keyframes _sv3-bar     { from{width:0%} to{width:${Math.min(risk, 100)}%} }
+      @keyframes _sv3-blink   { 0%,100%{opacity:1} 50%{opacity:0.3} }
+      @keyframes _sv3-typing  {
+        from { width:0 }
+        to   { width:100% }
+      }
+      #sentinel-security-overlay { animation: _sv3-fadein .4s cubic-bezier(.22,1,.36,1) forwards; }
+      #_sv3-card {
+        animation:
+          _sv3-pulse 2.4s ease-in-out infinite,
+          ${level === "danger" ? "_sv3-shake .6s ease .3s" : "none"};
+      }
+      #_sv3-risk-bar { animation: _sv3-bar 1.4s cubic-bezier(.22,1,.36,1) .5s both; }
+      #_sv3-scanline { animation: _sv3-scanline 4s linear infinite; pointer-events:none; }
+      #_sv3-cursor   { animation: _sv3-blink .8s step-end infinite; }
+      #_sv3-title    { overflow:hidden;white-space:nowrap; animation: _sv3-typing .6s steps(24,end) .3s both; }
+      #sentinel-leave-btn:hover  { filter:brightness(1.15); transform:translateY(-1px); }
+      #sentinel-ignore-btn:hover { background:rgba(255,255,255,.07)!important; color:#94a3b8!important; }
+      #sentinel-leave-btn, #sentinel-ignore-btn { transition: all 180ms ease; }
+    `;
+    (document.head || document.documentElement).appendChild(st);
+  }
+
+  // ── Build overlay DOM ────────────────────────────────────────────
+  const overlay = document.createElement("div");
+  overlay.id    = "sentinel-security-overlay";
+  overlay.setAttribute("role", "alertdialog");
+  overlay.setAttribute("aria-modal", "true");
+
+  overlay.innerHTML = `
+  <div style="
+    position:fixed;inset:0;
+    background:linear-gradient(160deg,#020617 0%,#060d1f 55%,#0a0e1f 100%);
+    z-index:2147483647;
+    display:flex;align-items:center;justify-content:center;
+    font-family:'Courier New',Courier,monospace;
+    padding:20px;
+    overflow:hidden;
+  ">
+
+    <!-- Animated scanline -->
+    <div id="_sv3-scanline" style="
+      position:absolute;left:0;right:0;height:2px;
+      background:linear-gradient(90deg,transparent,rgba(0,255,140,.12),transparent);
+      top:0;
+    "></div>
+
+    <!-- Background grid -->
+    <div style="
+      position:absolute;inset:0;
+      background-image:
+        linear-gradient(rgba(0,255,140,.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,255,140,.025) 1px, transparent 1px);
+      background-size:40px 40px;
+      pointer-events:none;
+    "></div>
+
+    <!-- Main card -->
+    <div id="_sv3-card" style="
+      border:1.5px solid ${threatColor};
+      border-radius:12px;
+      padding:36px 42px;
+      max-width:560px;width:100%;
+      background:rgba(2,6,23,.96);
+      color:#e2e8f0;
+      position:relative;
+      backdrop-filter:blur(12px);
+    ">
+
+      <!-- Corner decorations -->
+      <div style="position:absolute;top:0;left:0;width:16px;height:16px;border-top:2px solid ${threatColor};border-left:2px solid ${threatColor};border-radius:12px 0 0 0;"></div>
+      <div style="position:absolute;top:0;right:0;width:16px;height:16px;border-top:2px solid ${threatColor};border-right:2px solid ${threatColor};border-radius:0 12px 0 0;"></div>
+      <div style="position:absolute;bottom:0;left:0;width:16px;height:16px;border-bottom:2px solid ${threatColor};border-left:2px solid ${threatColor};border-radius:0 0 0 12px;"></div>
+      <div style="position:absolute;bottom:0;right:0;width:16px;height:16px;border-bottom:2px solid ${threatColor};border-right:2px solid ${threatColor};border-radius:0 0 12px 0;"></div>
+
+      <!-- Header -->
+      <div style="display:flex;align-items:center;gap:16px;border-bottom:1px solid rgba(255,255,255,.07);padding-bottom:20px;margin-bottom:24px;">
+        <div style="font-size:34px;line-height:1;filter:drop-shadow(0 0 8px ${threatColor});">🛡️</div>
+        <div style="flex:1;">
+          <div id="_sv3-title" style="color:${threatColor};font-size:15px;font-weight:900;letter-spacing:3px;text-transform:uppercase;">SENTINEL SECURITY ALERT<span id="_sv3-cursor" style="margin-left:2px;">█</span></div>
+          <div style="color:#334155;font-size:9px;margin-top:5px;letter-spacing:2px;">REAL-TIME THREAT DETECTION SYSTEM v3.0 • ${new Date().toLocaleTimeString()}</div>
+        </div>
+        <div style="
+          padding:4px 10px;border-radius:4px;
+          font-size:9px;letter-spacing:2px;font-weight:900;
+          background:${threatColor}22;border:1px solid ${threatColor}44;
+          color:${threatColor};
+        ">LIVE</div>
+      </div>
+
+      <!-- Risk bar -->
+      <div style="margin-bottom:24px;">
+        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+          <span style="color:#475569;font-size:9px;letter-spacing:2px;">RISK SCORE</span>
+          <span style="color:${threatColor};font-size:9px;font-weight:900;letter-spacing:1px;">${risk}/100</span>
+        </div>
+        <div style="background:rgba(255,255,255,.04);border-radius:4px;height:6px;overflow:hidden;border:1px solid rgba(255,255,255,.06);">
+          <div id="_sv3-risk-bar" style="height:100%;width:0%;background:linear-gradient(90deg,${threatColor}88,${threatColor});border-radius:4px;"></div>
+        </div>
+      </div>
+
+      <!-- Info grid -->
+      <div style="display:grid;grid-template-columns:120px 1fr;gap:12px 16px;font-size:12px;">
+        <span style="color:#334155;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;align-self:center;">DOMAIN</span>
+        <span style="color:#00ffcc;font-weight:bold;font-size:13px;letter-spacing:.5px;">${domain}</span>
+
+        <span style="color:#334155;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;align-self:center;">CONNECTION</span>
+        <span style="font-size:12px;">${connLabel}</span>
+
+        <span style="color:#334155;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;align-self:center;">THREAT LEVEL</span>
+        <span style="display:inline-flex;align-items:center;gap:6px;">
+          <span style="width:8px;height:8px;border-radius:50%;background:${threatColor};display:inline-block;box-shadow:0 0 6px ${threatColor};"></span>
+          <span style="background:${threatColor};color:#000;padding:3px 14px;border-radius:999px;font-size:10px;font-weight:900;letter-spacing:2px;">${threatLabel}</span>
+        </span>
+      </div>
+
+      <!-- Signals panel -->
+      <div style="margin-top:22px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);border-left:3px solid ${threatColor};border-radius:6px;padding:14px 18px;">
+        <div style="color:#334155;font-size:9px;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;">▸ THREAT SIGNALS DETECTED</div>
+        <ul style="margin:0;padding:0;list-style:none;">${signalsHtml}</ul>
+      </div>
+
+      <!-- Action buttons -->
+      <div style="display:flex;gap:12px;margin-top:28px;">
+        <button id="sentinel-leave-btn" style="
+          flex:1;padding:14px;
+          background:${threatColor};color:#000;
+          border:none;border-radius:8px;
+          font-family:'Courier New',monospace;
+          font-size:12px;font-weight:900;
+          letter-spacing:2.5px;cursor:pointer;
+          text-transform:uppercase;
+          box-shadow:0 0 20px ${glowColor};
+        ">← LEAVE SITE</button>
+        <button id="sentinel-ignore-btn" style="
+          flex:1;padding:14px;
+          background:transparent;color:#475569;
+          border:1px solid rgba(255,255,255,.1);
+          border-radius:8px;
+          font-family:'Courier New',monospace;
+          font-size:12px;font-weight:700;
+          letter-spacing:2px;cursor:pointer;
+          text-transform:uppercase;
+        ">IGNORE</button>
+      </div>
+
+      <!-- Footer -->
+      <div style="margin-top:20px;text-align:center;color:#1e293b;font-size:9px;letter-spacing:2.5px;">SENTINEL BROWSE v3.0 &bull; REAL-TIME PROTECTION ACTIVE</div>
+    </div>
+  </div>
+  `;
+
+  (document.body || document.documentElement).appendChild(overlay);
+
+  document.getElementById("sentinel-leave-btn")?.addEventListener("click", () => {
+    if (document.referrer) window.history.back();
+    else window.location.href = "https://www.google.com";
+  });
+  document.getElementById("sentinel-ignore-btn")?.addEventListener("click", () => {
+    overlay.remove();
+  });
+
+  // Optional: subtle sound cue for danger level
+  if (level === "danger") {
+    try { playAlertSound("malicious"); } catch {}
+  } else {
+    try { playAlertSound("suspicious"); } catch {}
+  }
+}
+
+// ── Run local detection after page is fully loaded ────────────────
+window.addEventListener("load", () => {
+  setTimeout(() => {
+    const threat = evaluateThreat();
+    if (threat) showSentinelAlert(threat);
+  }, 1200);
+});
+
+console.log("[Sentinel] Content script loaded:", location.href);
 let _networkMonitorInstalled = false;
 let _pageNetworkBridgeInstalled = false;
 let _decodedScriptAlertFired = false;
@@ -32,6 +337,37 @@ const _OVERLAY_COOLDOWN_MS = 5000; // 5 s between same-key overlays
 document.addEventListener("DOMContentLoaded", () => {
   console.log("[Sentinel] Content script ready");
 });
+
+function triggerSecurityOverlay(data) {
+  console.log("[Sentinel] Triggering overlay:", data);
+
+  const overlay = document.createElement("div");
+  overlay.id = "sentinel-overlay";
+  overlay.innerHTML = `
+    <div style="
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100vw;
+      height: 100vh;
+      background: rgba(255,0,0,0.85);
+      z-index: 999999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 28px;
+      font-weight: bold;
+      text-align: center;
+    ">
+      ⚠️ DANGER ⚠️<br/>
+      ${data.reason}<br/>
+      Risk: ${data.risk}/100
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+}
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "sentinel:play-alert") {
@@ -73,15 +409,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       window.__sentinel_last_overlay_api_calls = Array.isArray(message.apiCalls) ? message.apiCalls : [];
     } catch {}
 
-    // 🚨 CYBERSECURITY UPGRADE (v3.1): Full-screen danger overlay for MALICIOUS
-    if (message.status === "malicious") {
-      showDangerOverlay({
-        finalRiskScore: message.finalScore || message.score,
-        risk: message.finalScore || message.score,
-        signals: message.signals,
-        status: "malicious",
-      });
-      playAlertSound("malicious");   // ensure alarm plays on the malicious path
+    // Route by severity — use professional Sentinel UI for all threat levels
+    const _bgRisk = message.finalScore ?? message.score ?? 0;
+    const _bgSignals = Array.isArray(message.signals) ? message.signals : message.reasons || [];
+    const _bgLevel = message.status === "malicious" ? "danger" : "warning";
+
+    if (message.status === "malicious" || message.status === "suspicious") {
+      showSentinelAlert({ risk: _bgRisk, signals: _bgSignals, level: _bgLevel });
+      playAlertSound(message.status);
       sendResponse({ ok: true });
       return;
     }

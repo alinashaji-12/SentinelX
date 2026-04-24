@@ -10,7 +10,9 @@
     "webNavigation",
     "webRequest",
     "declarativeNetRequest",
-    "declarativeNetRequestFeedback"
+    "declarativeNetRequestFeedback",
+    "scripting",
+    "activeTab"
   ],
 
   "host_permissions": [
