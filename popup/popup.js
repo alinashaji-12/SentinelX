@@ -2,6 +2,33 @@
 
 "use strict";
 
+
+
+
+
+// Fallback if chrome.runtime is not available
+if (!window.chrome) window.chrome = {};
+if (!window.chrome.runtime) window.chrome.runtime = {
+  sendMessage: async (msg) => { console.warn('[Sentinel] chrome.runtime.sendMessage unavailable'); return {}; },
+  onMessage: { addListener: () => {} }
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GLOBAL ERROR HANDLING
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Handle uncaught errors
+window.addEventListener('error', (event) => {
+  console.error('[Sentinel] Uncaught error:', event.error);
+  event.preventDefault();
+}, true);
+
+// Handle promise rejections
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('[Sentinel] Unhandled promise rejection:', event.reason);
+  event.preventDefault();
+});
+
 const STORAGE_KEYS = {
   LAST_ANALYSIS: "sentinel_last_analysis",
   REPUTATION: "sentinel_reputation",
@@ -388,7 +415,7 @@ async function renderDashboard() {
   try {
     const tabId = tab?.id;
     if (tabId !== undefined && tabId !== null) {
-      const resp = await chrome.runtime.sendMessage({ type: "sentinel:get-tab-risk", tabId });
+      const resp = await chrome.runtime.sendMessage({ type: "sentinel:get-tab-risk", tabId }).catch(e => console.error("[Sentinel] sendMessage error:", e));
       behaviorRisk = typeof resp?.riskScore === "number" ? resp.riskScore : null;
     }
   } catch {
@@ -461,7 +488,7 @@ document.addEventListener("DOMContentLoaded", () => {
         btn.disabled = ok;
       }
       // Ping background so it can refresh report counts immediately.
-      try { await chrome.runtime.sendMessage({ type: "sentinel:reports-updated" }); } catch {}
+      try { await chrome.runtime.sendMessage({ type: "sentinel:reports-updated" }).catch(e => console.error("[Sentinel] sendMessage error:", e)); } catch {}
     } catch {
       if (btn) btn.textContent = "Report failed";
     }
@@ -474,7 +501,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const host = getHostname(url);
       const root = getRootDomain(host);
       const ok = await saveSafeMark(root || host);
-      try { await chrome.runtime.sendMessage({ type: "sentinel:mark-safe", domain: root || host }); } catch {}
+      try { await chrome.runtime.sendMessage({ type: "sentinel:mark-safe", domain: root || host }).catch(e => console.error("[Sentinel] sendMessage error:", e)); } catch {}
       if (btn) {
         btn.textContent = ok ? "Marked safe" : "Failed";
         btn.disabled = ok;
@@ -488,7 +515,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Developer mode toggle (chrome.storage.local.dev_mode)
   const toggle = $("devModeToggle");
   if (toggle) {
-    chrome.storage.local.get([STORAGE_KEYS.DEV_MODE], (data) => {
+    chrome.storage.local.get([STORAGE_KEYS.DEV_MODE], (data) => { try {
       toggle.checked = Boolean(data && data[STORAGE_KEYS.DEV_MODE]);
     });
     toggle.addEventListener("change", () => {

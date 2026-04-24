@@ -37,6 +37,35 @@
 
 "use strict";
 
+
+
+
+
+// Fallback for chrome API
+if (!window.chrome) window.chrome = {};
+if (!window.chrome.storage) window.chrome.storage = {
+  local: { get: (keys, cb) => cb({}), set: (data, cb) => cb() }
+};
+if (!window.chrome.runtime) window.chrome.runtime = {
+  sendMessage: async (msg) => ({})
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GLOBAL ERROR HANDLING
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Handle uncaught errors
+window.addEventListener('error', (event) => {
+  console.error('[Sentinel] Uncaught error in warning page:', event.error);
+  event.preventDefault();
+}, true);
+
+// Handle promise rejections
+window.addEventListener('unhandledrejection', (event) => {
+  console.error('[Sentinel] Unhandled promise rejection in warning page:', event.reason);
+  event.preventDefault();
+});
+
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SECTION 1 â€” STORAGE HELPERS
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -246,6 +275,7 @@ async function loadDetectionData() {
   // â”€â”€ Tier 2 fallback: chrome.storage.local â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // NOTE: Keys must be an array â€” NOT a string â€” for consistent behavior
   try {
+    if (!STORAGE_KEYS || !STORAGE_KEYS.LAST_ANALYSIS) { console.error("[Sentinel] Storage keys not configured"); return null; }
     const stored = await storageGet([STORAGE_KEYS.LAST_ANALYSIS]);
     const r = stored[STORAGE_KEYS.LAST_ANALYSIS];
 
@@ -335,7 +365,7 @@ function formatAttackType(type) {
  * @param {object} data
  */
 function renderUI(data) {
-  const $ = id => document.getElementById(id);
+  const $ = id => { const el = document.getElementById(id); if (!el) console.warn(`[Sentinel] DOM element #${id} not found`); return el; };
 
   // â”€â”€ Attack badge â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const badgeEl = $("attackBadge");
@@ -600,7 +630,7 @@ async function saveCommunityReport(domain) {
   await storageSet({ [STORAGE_KEYS.REPORTS]: reports.slice(0, 500) });
 
   // Inform background to refresh its in-memory report counts (best-effort).
-  try { await chrome.runtime.sendMessage({ type: "sentinel:reports-updated" }); } catch {}
+  try { await chrome.runtime.sendMessage({ type: "sentinel:reports-updated" }).catch(e => console.error("[Sentinel] sendMessage error:", e)); } catch {}
   return true;
 }
 
@@ -622,7 +652,7 @@ async function saveCommunitySafeMark(domain) {
   });
 
   await storageSet({ [STORAGE_KEYS.SAFE_MARKS]: marks.slice(0, 500) });
-  try { await chrome.runtime.sendMessage({ type: "sentinel:mark-safe", domain: host }); } catch {}
+  try { await chrome.runtime.sendMessage({ type: "sentinel:mark-safe", domain: host }).catch(e => console.error("[Sentinel] sendMessage error:", e)); } catch {}
   return true;
 }
 
@@ -828,7 +858,7 @@ async function executeProceed(targetUrl, attackType) {
     const response = await chrome.runtime.sendMessage({
       type: "sentinel:bypass-url",
       url: targetUrl,
-    });
+    }).catch(e => console.error("[Sentinel] sendMessage error:", e));
     if (response && response.ok) {
       bypassRegistered = true;
       console.log("[Sentinel Warning] Bypass registered via SW.");
@@ -860,7 +890,7 @@ async function executeProceed(targetUrl, attackType) {
 
       // Read-modify-write directly
       await new Promise((resolve, reject) => {
-        chrome.storage.local.get([STORAGE_KEY], (data) => {
+        chrome.storage.local.get([STORAGE_KEY], (data) => { try {
           const bypasses = (data && data[STORAGE_KEY]) || {};
           bypasses[normalizedUrl] = {
             url: targetUrl,

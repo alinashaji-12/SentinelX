@@ -29,7 +29,7 @@
 function sendMsg(message) {
   return new Promise((resolve, reject) => {
     try {
-      chrome.runtime.sendMessage(message, (response) => {
+      chrome.runtime.sendMessage(message, (response).catch(e => console.error("[Sentinel] sendMessage error:", e)) => {
         if (chrome.runtime.lastError) {
           reject(new Error(chrome.runtime.lastError.message));
         } else {
@@ -94,7 +94,7 @@ function getTrustScoreTone(ts) {
 function renderTable() {
   const bodyEl    = document.getElementById("historyBody");
   const emptyEl   = document.getElementById("emptyState");
-  if (!bodyEl) return;
+  if (!bodyEl || !emptyEl) return;
 
   const filtered = applyFilter(historyItems, selectedFilter);
   bodyEl.innerHTML = "";

@@ -198,16 +198,18 @@ function reportBehavior(event, severity, confidence = "MEDIUM", userInitiated = 
 
   try {
     chrome.runtime.sendMessage({
-      type:      "BEHAVIOR_ALERT",
+      type:          "BEHAVIOR_ALERT",
       event,
       severity,
       confidence,
       userInitiated,
-      url:       location.href,
+      url:           location.href,
       details,
-      timestamp: Date.now(),
-    }).catch(() => {
-      // Background service worker may be sleeping — alerts are best-effort.
+      timestamp:     Date.now(), // FIX: Date.now() returns a number, NOT a Promise
+    }, () => {
+      // Callback form avoids MV3 unhandled-rejection noise.
+      // chrome.runtime.lastError is consumed implicitly.
+      void chrome.runtime.lastError;
     });
   } catch {
     // chrome.runtime unavailable (e.g. extension context invalidated).
@@ -360,7 +362,7 @@ const PUSH_STATE_WINDOW_MS       = 4000;
 // ── Track user interactions ────────────────────────────────────────────────
 // Update both the raw timestamp (for 500 ms correlation window used by redirects)
 // AND the explicit boolean flag (for the 1 s clipboard guard — Rule 2).
-document.addEventListener("click",   () => { lastUserEventTime = Date.now(); _markUserInitiated(); }, { capture: true, passive: true });
+try { document.addEventListener("click",   () => { lastUserEventTime = Date.now(); _markUserInitiated(); }, { capture: true, passive: true }); } catch (e) { console.warn("[Sentinel] Click listener failed:", e); }
 document.addEventListener("keydown", () => { lastUserEventTime = Date.now(); _markUserInitiated(); }, { capture: true, passive: true });
 document.addEventListener("input",   () => { lastUserEventTime = Date.now(); _markUserInitiated(); }, { capture: true, passive: true });
 document.addEventListener("copy",    () => { lastUserEventTime = Date.now(); }, { capture: true, passive: true });
