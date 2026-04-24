@@ -1,0 +1,145 @@
+# Sentinel Browse Extension — Production Upgrade
+
+This plan upgrades the extension accuracy, reduces false positives, and makes it behave like a real-world cybersecurity product while preserving all existing working code.
+
+## Proposed Changes
+
+---
+
+### New Utility Module
+
+#### [NEW] [domainWhitelist.js](file:///d:/sentinel-browse-extension/detection/domainWhitelist.js)
+
+A centralized whitelist and search-engine-aware helper (exported functions used by [signature.js](file:///d:/sentinel-browse-extension/detection/signature.js) and [advancedEngine.js](file:///d:/sentinel-browse-extension/detection/advancedEngine.js)):
+- `TRUSTED_DOMAINS` — expanded list (google, bing, youtube, microsoft, github, apple, amazon, wikipedia, linkedin, twitter/x, cloudflare, mozilla, openai)
+- `SEARCH_ENGINE_HOSTS` — { google.com, bing.com, duckduckgo.com, yahoo.com, baidu.com }
+- `getRootDomain(url)` — extracts **root eTLD+1** only (strips subdomains) using URL API
+- [isTrustedDomain(url)](file:///d:/sentinel-browse-extension/detection/advancedEngine.js#46-49) — checks root domain via `endsWith()`
+- `isSearchEngineQuery(url)` — returns `true` only when host is a search engine **and** path starts with `/search` or query contains `q=`
+
+---
+
+### Detection Engine Fixes
+
+#### [MODIFY] [signature.js](file:///d:/sentinel-browse-extension/detection/signature.js)
+
+**Problem:** flags `google.com/search?q=login+verify` as malicious because `login`/`verify` keywords appear in the URL.
+
+**Fix:**
+- Import [isTrustedDomain](file:///d:/sentinel-browse-extension/detection/advancedEngine.js#46-49), `isSearchEngineQuery` from `domainWhitelist.js`
+- Before keyword scan, return `{ flag: false }` if URL is a trusted domain or a search engine query
+- This prevents ALL false positives on whitelisted/search URLs
+
+#### [MODIFY] [advancedEngine.js](file:///d:/sentinel-browse-extension/detection/advancedEngine.js)
+
+Key improvements across all 8 task steps:
+
+**Step 1 – False positives:** Use `getRootDomain()` for domain extraction; gate keyword penalty behind `!isTrustedDomain` AND `!isSearchEngineQuery`
+
+**Step 2 – Trust Engine (weighted scoring):**
+| Factor | Weight change |
+|---|---|
+| Safe Browsing match | +5 (was +4) |
+| Dataset match | +4 (was +3) |
+| ML malicious | +3 (was +2) |
+| Signature match | +3 (unchanged) |
+| Obfuscation | +2 (unchanged) |
+| Behavior flag | +2 (unchanged) |
+| IP address used | +2 (unchanged) |
+| Long URL (>150) | +1 (unchanged) |
+| High dot count (>5) | +1 (unchanged) |
+| Special chars (>=6) | +1 (unchanged) |
+| **Trusted domain** | **–5 (was –3)** |
+| Reputable profile | –3 (was –2) |
+
+**Step 4 – Context-aware detection:** `isSearchEngineQuery()` check gates keyword score; body of conditionals adds explicit reason `"Search engine query on trusted domain"`
+
+**Step 7 – Decision engine priority (strictly enforced):**
+```
+1. safeBrowsing.isMalicious → MALICIOUS (hard override)
+2. dataset.flag → MALICIOUS (hard override)
+3. score > 5 AND totalSignals >= 2 → MALICIOUS
+4. score > 2 OR suspiciousSignalCount >= 1 → SUSPICIOUS
+5. else → SAFE
+```
+
+**Step 8 – Structured logging:** [analyzeUrlAdvanced](file:///d:/sentinel-browse-extension/detection/advancedEngine.js#68-268) returns `logPayload` field with `{ url, domain, score, trustScore, status, reasons }` consumed by [background.js](file:///d:/sentinel-browse-extension/background.js)
+
+---
+
+### Background Orchestration
+
+#### [MODIFY] [background.js](file:///d:/sentinel-browse-extension/background.js)
+
+**Step 8 – Enhanced [logFinalResult()](file:///d:/sentinel-browse-extension/background.js#149-159):**  
+Log full structured object: `url`, `domain`, `score`, `trustScore`, `status`, `reasons[]`, `sources[]`, `signalCount`
+
+Minor: already delegates correctly to `handleMaliciousUrl / handleSuspiciousUrl / handleSafeUrl` — no structural changes needed.
+
+---
+
+### Adaptive Learning
+
+#### [MODIFY] [adaptiveProfile.js](file:///d:/sentinel-browse-extension/utils/adaptiveProfile.js)
+
+**Step 5 – Enhance [getDomainProfileSnapshot()](file:///d:/sentinel-browse-extension/utils/adaptiveProfile.js#21-50):**
+- If `safeVisits >= 5` AND `maliciousDetections === 0` → `trustBoost = true` (used in advancedEngine to give –2 bonus)
+- If `maliciousDetections >= 3` OR `riskRatio >= 0.6` → `highRisk = true` (used for +2 bonus)
+- These two new boolean fields feed into the scoring in [advancedEngine.js](file:///d:/sentinel-browse-extension/detection/advancedEngine.js)
+
+---
+
+### UI/UX Improvements
+
+#### [MODIFY] [content.js](file:///d:/sentinel-browse-extension/content.js)
+
+**Step 6 – Enhanced overlay:**
+- **Safe:** green gradient, trust score badge (top-right), auto-hide 3s, shield icon ✅
+- **Suspicious:** amber gradient, ⚠️ icon, show reasons list, sound plays, auto-hide 6s  
+- **Malicious:** deep red gradient, 🚫 icon, show reasons, NO auto-hide, pointer-events enabled (user can dismiss)
+- Add dismiss `×` button on suspicious/malicious overlays
+- Overlay now 300px wide, uses smoother slide-in animation
+
+---
+
+### Warning Page
+
+#### [MODIFY] [warning.html](file:///d:/sentinel-browse-extension/warning.html)
+
+**Step 6 – Malicious block page:**
+- Add animated pulsing red border on card
+- Add `Trust Score` mini-card to transparency grid (was missing)
+- Display "MALICIOUS SITE BLOCKED" badge more prominently with larger font
+- Show `domain` extracted from URL as a highlighted field
+
+---
+
+## Verification Plan
+
+### Manual Testing in Chrome (Load Unpacked)
+
+1. Open `chrome://extensions`, enable Developer Mode, click **Load unpacked**, select `d:\sentinel-browse-extension`
+2. Navigate to `https://www.google.com/search?q=login+verify` → **Expected**: ✅ Green overlay "Safe Website" (no false positive)
+3. Navigate to `https://paypal-login-secure.com` → **Expected**: 🚫 Redirect to warning.html (dataset match → MALICIOUS)
+4. Navigate to `https://192.168.1.1` → **Expected**: ⚠️ Yellow overlay "Suspicious" with reason "Uses IP address instead of domain"
+5. Navigate to `https://github.com` → **Expected**: ✅ Green overlay with 95+ trust score
+6. Open [dashboard.html](file:///d:/sentinel-browse-extension/dashboard.html) via extension popup → Run Simulation with `http://fake-google-login.xyz/verify` → **Expected**: MALICIOUS verdict with reasons
+7. Check DevTools console (background service worker) → Verify log output contains `[Sentinel] Final Decision:` with full structured object including `domain`, `score`, `trustScore`, `reasons[]`
+
+### Console Log Verification
+
+In the Chrome DevTools background service worker console, each scan should log:
+```json
+{
+  "url": "...",
+  "domain": "...",
+  "score": 7,
+  "trustScore": 25,
+  "status": "malicious",
+  "reasons": ["..."],
+  "signalCount": 3
+}
+```
+
+> [!NOTE]
+> There are no automated tests in this project. All verification is via Chrome's extension loading flow and manual browser navigation.

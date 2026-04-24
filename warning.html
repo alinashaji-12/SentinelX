@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Deceptive Site Blocked — Sentinel Browse</title>
+    <style>
+      /* ── Design tokens ──────────────────────────────────────── */
+      :root {
+        --c-bg:             #0d0d0d;
+        --c-surface:        #141414;
+        --c-surface-2:      #1a1a1a;
+        --c-border:         #2a2a2a;
+        --c-border-danger:  rgba(220, 38, 38, 0.35);
+        --c-text:           #f5f5f5;
+        --c-muted:          #9ca3af;
+        --c-danger:         #ef4444;
+        --c-danger-dim:     rgba(239, 68, 68, 0.12);
+        --c-danger-glow:    rgba(239, 68, 68, 0.08);
+        --c-warn:           #f59e0b;
+        --c-safe:           #22c55e;
+        --c-accent:         #dc2626;
+        --c-accent-hover:   #b91c1c;
+        --c-badge-bg:       rgba(239, 68, 68, 0.15);
+        --radius-sm:        8px;
+        --radius-md:        14px;
+        --radius-lg:        20px;
+        --shadow-card:      0 0 0 1px var(--c-border-danger),
+                            0 24px 64px rgba(0, 0, 0, 0.6),
+                            0 0 80px var(--c-danger-glow);
+        --font:             "Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif;
+        --transition:       140ms cubic-bezier(0.4, 0, 0.2, 1);
+      }
+
+      /* ── Reset ──────────────────────────────────────────────── */
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+      /* ── Body ───────────────────────────────────────────────── */
+      body {
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px 16px;
+        background: var(--c-bg);
+        background-image:
+          radial-gradient(ellipse 80% 50% at 50% -10%, rgba(220, 38, 38, 0.06) 0%, transparent 70%);
+        color: var(--c-text);
+        font-family: var(--font);
+        line-height: 1.5;
+      }
+
+      /* ── Pulsing border animation for the card ──────────────── */
+      @keyframes borderPulse {
+        0%, 100% { box-shadow: var(--shadow-card); }
+        50%       { box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.5),
+                                0 24px 64px rgba(0, 0, 0, 0.6),
+                                0 0 120px rgba(239, 68, 68, 0.14); }
+      }
+
+      @keyframes fadeIn {
+        from { opacity: 0; transform: translateY(12px); }
+        to   { opacity: 1; transform: translateY(0); }
+      }
+
+      @keyframes slideIn {
+        from { opacity: 0; transform: translateX(-8px); }
+        to   { opacity: 1; transform: translateX(0); }
+      }
+
+      /* ── Card ───────────────────────────────────────────────── */
+      .card {
+        width: min(780px, 100%);
+        background: var(--c-surface);
+        border: 1px solid var(--c-border-danger);
+        border-radius: var(--radius-lg);
+        padding: 36px 40px;
+        animation: borderPulse 3s ease-in-out infinite, fadeIn 0.4s ease both;
+      }
+
+      /* ── Header ─────────────────────────────────────────────── */
+      .header {
+        display: flex;
+        align-items: flex-start;
+        gap: 18px;
+        margin-bottom: 28px;
+      }
+
+      .shield-icon {
+        flex-shrink: 0;
+        width: 64px;
+        height: 64px;
+        border-radius: 50%;
+        background: var(--c-danger-dim);
+        border: 1.5px solid rgba(239, 68, 68, 0.4);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 28px;
+      }
+
+      .header-text h1 {
+        font-size: clamp(22px, 4vw, 30px);
+        font-weight: 700;
+        color: var(--c-danger);
+        letter-spacing: -0.02em;
+        line-height: 1.1;
+      }
+
+      .header-text .subtitle {
+        margin-top: 6px;
+        color: var(--c-muted);
+        font-size: 14px;
+      }
+
+      /* ── Attack type badge ──────────────────────────────────── */
+      .attack-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 24px;
+        padding: 6px 14px;
+        border-radius: 999px;
+        background: var(--c-badge-bg);
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        color: var(--c-danger);
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      /* ── Section label ──────────────────────────────────────── */
+      .label {
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--c-muted);
+        margin-bottom: 8px;
+      }
+
+      /* ── URL display ─────────────────────────────────────────── */
+      .url-box {
+        padding: 14px 16px;
+        background: var(--c-surface-2);
+        border: 1px solid var(--c-border);
+        border-radius: var(--radius-md);
+        font-size: 13px;
+        font-family: "Cascadia Code", "Fira Code", "Consolas", monospace;
+        color: #fca5a5;
+        word-break: break-all;
+        line-height: 1.6;
+        margin-bottom: 20px;
+      }
+
+      /* ── Reasons list ────────────────────────────────────────── */
+      .reasons-box {
+        padding: 16px;
+        background: var(--c-surface-2);
+        border: 1px solid var(--c-border);
+        border-radius: var(--radius-md);
+        margin-bottom: 20px;
+      }
+
+      .reason-item {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        font-size: 13px;
+        color: #e5e7eb;
+        line-height: 1.5;
+        animation: slideIn 0.3s ease both;
+      }
+
+      .reason-item + .reason-item { margin-top: 10px; }
+
+      .reason-dot {
+        flex-shrink: 0;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--c-danger);
+        margin-top: 7px;
+      }
+
+      /* ── Stats grid ──────────────────────────────────────────── */
+      .stats-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+        margin-bottom: 20px;
+      }
+
+      .stat-card {
+        padding: 16px;
+        background: var(--c-surface-2);
+        border: 1px solid var(--c-border);
+        border-radius: var(--radius-md);
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .stat-label {
+        font-size: 11px;
+        color: var(--c-muted);
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+      }
+
+      .stat-value {
+        font-size: 26px;
+        font-weight: 700;
+        color: var(--c-danger);
+        line-height: 1.1;
+      }
+
+      /* ── Risk meter ──────────────────────────────────────────── */
+      .risk-meter-wrapper {
+        margin-bottom: 20px;
+      }
+
+      .risk-meter-bar {
+        height: 6px;
+        background: var(--c-border);
+        border-radius: 999px;
+        overflow: hidden;
+        margin-top: 8px;
+      }
+
+      .risk-meter-fill {
+        height: 100%;
+        border-radius: 999px;
+        transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+        background: linear-gradient(90deg, #f59e0b, #ef4444, #dc2626);
+      }
+
+      /* ── Signal chips ────────────────────────────────────────── */
+      .signals-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-bottom: 20px;
+      }
+
+      .signal-chip {
+        padding: 5px 12px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        background: rgba(239, 68, 68, 0.12);
+        border: 1px solid rgba(239, 68, 68, 0.25);
+        color: #fca5a5;
+        letter-spacing: 0.02em;
+      }
+
+      /* ── Sources panel ───────────────────────────────────────── */
+      .sources-panel {
+        padding: 16px;
+        background: var(--c-surface-2);
+        border: 1px solid var(--c-border);
+        border-radius: var(--radius-md);
+        margin-bottom: 20px;
+      }
+
+      .source-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 13px;
+        padding: 6px 0;
+      }
+
+      .source-row + .source-row {
+        border-top: 1px solid var(--c-border);
+        margin-top: 4px;
+      }
+
+      .source-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex-shrink: 0;
+      }
+
+      .source-dot.triggered { background: var(--c-danger); }
+      .source-dot.safe      { background: var(--c-safe); }
+
+      .source-name { color: var(--c-text); flex: 1; }
+      .source-verdict.triggered { color: var(--c-danger); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+      .source-verdict.safe      { color: var(--c-safe);   font-size: 11px; font-weight: 700; text-transform: uppercase; }
+      .source-detail { color: var(--c-muted); font-size: 11px; }
+
+      /* ── DNR notice ──────────────────────────────────────────── */
+      .dnr-notice {
+        display: none;
+        padding: 12px 16px;
+        background: rgba(245, 158, 11, 0.08);
+        border: 1px solid rgba(245, 158, 11, 0.25);
+        border-radius: var(--radius-md);
+        color: #fcd34d;
+        font-size: 13px;
+        margin-bottom: 20px;
+        gap: 10px;
+        align-items: flex-start;
+      }
+
+      .dnr-notice.visible { display: flex; }
+
+      /* ── Privacy note ────────────────────────────────────────── */
+      .privacy-note {
+        padding: 14px 16px;
+        background: var(--c-surface-2);
+        border: 1px solid var(--c-border);
+        border-radius: var(--radius-md);
+        color: var(--c-muted);
+        font-size: 12px;
+        line-height: 1.6;
+        margin-bottom: 24px;
+      }
+
+      /* ── Actions ─────────────────────────────────────────────── */
+      .actions {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      button {
+        border: none;
+        cursor: pointer;
+        border-radius: var(--radius-sm);
+        padding: 12px 20px;
+        font-size: 14px;
+        font-weight: 600;
+        font-family: var(--font);
+        transition: background var(--transition), transform var(--transition), opacity var(--transition);
+      }
+
+      button:active { transform: scale(0.98); }
+
+      .btn-back {
+        background: var(--c-accent);
+        color: #fff;
+        flex: 1;
+        min-width: 120px;
+      }
+
+      .btn-back:hover { background: var(--c-accent-hover); }
+
+      .btn-proceed {
+        background: transparent;
+        border: 1px solid var(--c-border);
+        color: var(--c-muted);
+        padding: 12px 20px;
+      }
+
+      .btn-proceed:hover { border-color: #4b5563; color: var(--c-text); }
+
+      #proceedBtn.confirming {
+        background: rgba(239, 68, 38, 0.15);
+        border-color: var(--c-danger);
+        color: var(--c-danger);
+      }
+
+      /* ── Loading state ───────────────────────────────────────── */
+      .loading {
+        color: var(--c-muted);
+        font-size: 13px;
+        font-style: italic;
+      }
+
+      /* ── Responsive ──────────────────────────────────────────── */
+      @media (max-width: 600px) {
+        .card { padding: 24px 20px; }
+        .header { flex-direction: column; gap: 12px; }
+        .actions { flex-direction: column; }
+        .btn-back, .btn-proceed { width: 100%; }
+        .stats-grid { grid-template-columns: repeat(2, 1fr); }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card" role="main" aria-label="Security warning">
+
+      <!-- Header -->
+      <div class="header">
+        <div class="shield-icon" aria-hidden="true">🛡️</div>
+        <div class="header-text">
+          <h1>Deceptive Site Blocked</h1>
+          <p class="subtitle" id="subtitleText">
+            Sentinel Browse blocked this page to protect your security.
+          </p>
+        </div>
+      </div>
+
+      <!-- Attack type badge -->
+      <div class="attack-badge" id="attackBadge" aria-label="Attack type">
+        <span aria-hidden="true">⚠</span>
+        <span id="attackTypeText">Analyzing…</span>
+      </div>
+
+      <!-- DNR notice (shown when triggered by declarativeNetRequest) -->
+      <div class="dnr-notice" id="dnrNotice" role="note" aria-label="DNS-level block notice">
+        <span aria-hidden="true">⚡</span>
+        <span>
+          This domain was blocked at the network layer before the page
+          could load — the fastest possible protection. Domain:
+          <strong id="dnrDomain"></strong>
+        </span>
+      </div>
+
+      <!-- Blocked URL -->
+      <p class="label">Blocked URL</p>
+      <div class="url-box" id="blockedUrl" aria-label="Blocked URL" role="code">
+        Loading…
+      </div>
+
+      <!-- Detection reasons -->
+      <p class="label">Why was this blocked?</p>
+      <div class="reasons-box" id="reasonsBox" aria-label="Detection reasons">
+        <span class="loading">Loading reasons…</span>
+      </div>
+
+      <!-- Stats grid: confidence + signal count -->
+      <div class="stats-grid" role="group" aria-label="Detection statistics">
+        <div class="stat-card">
+          <span class="stat-label">Confidence</span>
+          <span class="stat-value" id="confidenceValue">—</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Risk Score</span>
+          <span class="stat-value" id="scoreValue">—</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Signals</span>
+          <span class="stat-value" id="signalCountValue">—</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Trust Score</span>
+          <span class="stat-value" id="trustScoreValue">—</span>
+        </div>
+      </div>
+
+      <!-- Risk meter -->
+      <div class="risk-meter-wrapper" role="meter" aria-label="Risk level">
+        <p class="label">Risk Level</p>
+        <div class="risk-meter-bar" aria-hidden="true">
+          <div class="risk-meter-fill" id="riskMeterFill" style="width: 0%"></div>
+        </div>
+      </div>
+
+      <!-- Signal chips -->
+      <p class="label">Detected Signals</p>
+      <div class="signals-row" id="signalsRow" aria-label="Active threat signals">
+        <span class="loading">Loading…</span>
+      </div>
+
+      <!-- Source module breakdown -->
+      <p class="label">Detection Modules</p>
+      <div class="sources-panel" id="sourcesPanel" aria-label="Detection module breakdown">
+        <span class="loading">Loading…</span>
+      </div>
+
+      <!-- Privacy note -->
+      <div class="privacy-note" role="note">
+        🔒 All analysis is performed locally on your device. No URLs, browsing data,
+        or personal information are sent to any server. Sentinel Browse is fully offline-capable.
+      </div>
+
+      <!-- Action buttons -->
+      <div class="actions">
+        <button id="goBackBtn" class="btn-back" type="button" aria-label="Go back to safety">
+          ← Go Back to Safety
+        </button>
+        <button id="reportBtn" class="btn-proceed" type="button" aria-label="Report this site as malicious">
+          Report this site
+        </button>
+        <button id="markSafeBtn" class="btn-proceed" type="button" aria-label="Mark this site as safe">
+          Mark safe
+        </button>
+        <button id="proceedBtn" class="btn-proceed" type="button" aria-label="Proceed to dangerous site anyway">
+          Proceed Anyway
+        </button>
+      </div>
+
+    </main>
+
+    <script src="./warning.js"></script>
+  </body>
+</html>

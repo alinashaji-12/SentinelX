@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sentinel Phishing Test Console Guide</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      background: #0d1117;
+      color: #c9d1d9;
+      max-width: 1200px;
+      margin: 0;
+      padding: 20px;
+      line-height: 1.6;
+    }
+    .header {
+      text-align: center;
+      margin-bottom: 40px;
+      border-bottom: 2px solid #30363d;
+      padding-bottom: 20px;
+    }
+    h1 { color: #58a6ff; margin: 0 0 10px; font-size: 32px; }
+    .subtitle { color: #8b949e; font-size: 14px; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+      gap: 20px;
+      margin-bottom: 40px;
+    }
+
+    .test-card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 20px;
+      transition: transform 0.2s, border-color 0.2s;
+    }
+
+    .test-card:hover {
+      transform: translateY(-2px);
+      border-color: #58a6ff;
+    }
+
+    .test-num {
+      display: inline-block;
+      background: #238636;
+      color: white;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-weight: bold;
+      margin-bottom: 10px;
+      font-size: 12px;
+    }
+
+    .test-num.malicious {
+      background: #da3633;
+    }
+
+    .test-num.suspicious {
+      background: #d29922;
+    }
+
+    .test-num.safe {
+      background: #238636;
+    }
+
+    .url-input {
+      background: #0d1117;
+      border: 1px dashed #30363d;
+      color: #58a6ff;
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 12px;
+      word-break: break-all;
+      margin: 10px 0;
+      border-left: 3px solid #58a6ff;
+    }
+
+    .command {
+      background: #0d1117;
+      border-left: 3px solid #79c0ff;
+      padding: 12px;
+      margin: 12px 0;
+      border-radius: 4px;
+      font-family: "Courier New", monospace;
+      font-size: 13px;
+      overflow-x: auto;
+    }
+
+    .copy-btn {
+      background: #238636;
+      color: white;
+      border: none;
+      padding: 4px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 11px;
+      margin-left: 10px;
+    }
+
+    .copy-btn:hover {
+      background: #2ea043;
+    }
+
+    .expected {
+      background: rgba(34, 134, 58, 0.1);
+      border-left: 3px solid #238636;
+      padding: 12px;
+      margin: 12px 0;
+      border-radius: 4px;
+      font-size: 12px;
+    }
+
+    .expected strong {
+      color: #58a6ff;
+    }
+
+    .expected .status {
+      display: inline-block;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-weight: bold;
+      margin-right: 8px;
+    }
+
+    .status.malicious {
+      background: #da3633;
+      color: white;
+    }
+
+    .status.suspicious {
+      background: #d29922;
+      color: white;
+    }
+
+    .status.safe {
+      background: #238636;
+      color: white;
+    }
+
+    .instructions {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-left: 3px solid #79c0ff;
+      padding: 20px;
+      border-radius: 6px;
+      margin-bottom: 30px;
+    }
+
+    .instructions h3 {
+      margin-top: 0;
+      color: #58a6ff;
+    }
+
+    .instructions ol {
+      margin: 10px 0;
+      padding-left: 20px;
+    }
+
+    .instructions li {
+      margin: 8px 0;
+    }
+
+    .instructions code {
+      background: #0d1117;
+      padding: 2px 6px;
+      border-radius: 3px;
+      color: #79c0ff;
+      font-family: monospace;
+    }
+
+    .summary-table {
+      width: 100%;
+      margin-top: 40px;
+      background: #161b22;
+      border-collapse: collapse;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .summary-table th,
+    .summary-table td {
+      padding: 12px;
+      text-align: left;
+      border-bottom: 1px solid #30363d;
+      font-size: 13px;
+    }
+
+    .summary-table th {
+      background: #0d1117;
+      color: #58a6ff;
+      font-weight: 600;
+      border-bottom: 2px solid #30363d;
+    }
+
+    .summary-table tr:hover {
+      background: rgba(88, 166, 255, 0.1);
+    }
+
+    .verdict {
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
+
+    .verdict.pass {
+      background: rgba(34, 134, 58, 0.2);
+      color: #3fb950;
+    }
+
+    .verdict.partial {
+      background: rgba(210, 153, 34, 0.2);
+      color: #d29922;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🛡️ Sentinel Phishing Bypass Test</h1>
+    <p class="subtitle">7 Real-World Attack Patterns | Browser Console Guide</p>
+  </div>
+
+  <div class="instructions">
+    <h3>🚀 Quick Start</h3>
+    <ol>
+      <li>Open Chrome → Press <code>F12</code> → Go to <strong>Sources</strong> tab</li>
+      <li>In the <strong>left sidebar</strong>, find your extension in the Service Worker list</li>
+      <li>Click on it to open the background page console</li>
+      <li>Copy each test command from the cards below</li>
+      <li>Paste into console and check the result against "Expected Result"</li>
+      <li>For "malicious" results, notice the <code>redirectUrl</code> pointing to warning.html</li>
+    </ol>
+  </div>
+
+  <div class="grid">
+
+    <!-- TEST 1 -->
+    <div class="test-card">
+      <div class="test-num malicious">TEST 1: Keyword + TLD</div>
+      <h4>secure-login-account-update.xyz</h4>
+
+      <div class="url-input">
+        http://secure-login-account-update.xyz
+      </div>
+
+      <strong>Command:</strong>
+      <div class="command">
+        analyzeUrlAdvancedSync("http://secure-login-account-update.xyz")
+        <button class="copy-btn">Copy</button>
+      </div>
+
+      <div class="expected">
+        <strong>Expected Result:</strong><br>
+        <span class="status malicious">MALICIOUS</span> <strong>PHISHING</strong>
+        <br><br>
+        ✓ score: 9 (high)<br>
+        ✓ trustScore: 10 (blocked)<br>
+        ✓ confidence: 100%<br>
+        ✓ signals: 4 detected<br><br>
+        <strong>Why:</strong> 4 keywords (secure, login, account, update) + 3 hyphens + .xyz TLD = confirmed phishing pattern
+      </div>
+    </div>
+
+    <!-- TEST 2 -->
+    <div class="test-card">
+      <div class="test-num malicious">TEST 2: Subdomain Spoof</div>
+      <h4>google.com.secure-login.xyz</h4>
+
+      <div class="url-input">
+        http://google.com.secure-login.xyz
+      </div>
+
+      <strong>Command:</strong>
+      <div class="command">
+        analyzeUrlAdvancedSync("http://google.com.secure-login.xyz")
+        <button class="copy-btn">Copy</button>
+      </div>
+
+      <div class="expected">
+        <strong>Expected Result:</strong><br>
+        <span class="status malicious">MALICIOUS</span> <strong>PHISHING</strong>
+        <br><br>
+        ✓ score: 7 (high)<br>
+        ✓ trustScore: 30<br>
+        ✓ confidence: 100%<br>
+        ✓ signals: 4 detected<br><br>
+        <strong>Why:</strong> Real domain (google.com) embedded inside fake domain + keywords + .xyz TLD
+      </div>
+    </div>
+
+    <!-- TEST 3 -->
+    <div class="test-card">
+      <div class="test-num suspicious">TEST 3: URL Obfuscation</div>
+      <h4>example.com/login%2Fsecure%2Fupdate</h4>
+
+      <div class="url-input">
+        http://example.com/login%2Fsecure%2Fupdate
+      </div>
+
+      <strong>Command:</strong>
+      <div class="command">
+        analyzeUrlAdvancedSync("http://example.com/login%2Fsecure%2Fupdate")
+        <button class="copy-btn">Copy</button>
+      </div>
+
+      <div class="expected">
+        <strong>Expected Result:</strong><br>
+        <span class="status suspicious">SUSPICIOUS</span> <strong>OBFUSCATED_URL</strong>
+        <br><br>
+        ✓ score: 2 (low-medium)<br>
+        ✓ trustScore: 80<br>
+        ✓ confidence: 30%<br>
+        ✓ signals: 1 detected<br><br>
+        <strong>Why:</strong> Percent-encoding in path (%2F = /) to hide URL structure from users
+      </div>
+    </div>
+
+    <!-- TEST 4 -->
+    <div class="test-card">
+      <div class="test-num malicious">TEST 4: IP-based Phishing</div>
+      <h4>192.168.0.1/login</h4>
+
+      <div class="url-input">
+        http://192.168.0.1/login
+      </div>
+
+      <strong>Command:</strong>
+      <div class="command">
+        analyzeUrlAdvancedSync("http://192.168.0.1/login")
+        <button class="copy-btn">Copy</button>
+      </div>
+
+      <div class="expected">
+        <strong>Expected Result:</strong><br>
+        <span class="status malicious">MALICIOUS</span> <strong>MALWARE</strong>
+        <br><br>
+        ✓ score: 5 (high)<br>
+        ✓ trustScore: 50<br>
+        ✓ confidence: 75%<br>
+        ✓ signals: 2 detected<br><br>
+        <strong>Why:</strong> Raw IP addresses are INSTANT red flag — no legitimate site uses bare IP for main domain
+      </div>
+    </div>
+
+    <!-- TEST 5 -->
+    <div class="test-card">
+      <div class="test-num suspicious">TEST 5: Token/Tracking</div>
+      <h4>secure-login-account.com/session=asd...</h4>
+
+      <div class="url-input">
+        http://secure-login-account.com/session=asdkj1231231asd123asd
+      </div>
+
+      <strong>Command:</strong>
+      <div class="command">
+        analyzeUrlAdvancedSync("http://secure-login-account.com/session=asdkj1231231asd123asd")
+        <button class="copy-btn">Copy</button>
+      </div>
+
+      <div class="expected">
+        <strong>Expected Result:</strong><br>
+        <span class="status suspicious">SUSPICIOUS</span> <strong>PHISHING</strong>
+        <br><br>
+        ✓ score: 5 (medium)<br>
+        ✓ trustScore: 50<br>
+        ✓ confidence: 75%<br>
+        ✓ signals: 2 detected<br><br>
+        <strong>Why:</strong> 3 keywords (secure, login, account) + .com (legit TLD) = suspicious, not malicious
+      </div>
+    </div>
+
+    <!-- TEST 6 -->
+    <div class="test-card">
+      <div class="test-num safe">TEST 6: Redirect Trap</div>
+      <h4>example.com/login?redirect=...xyz</h4>
+
+      <div class="url-input">
+        http://example.com/login?redirect=secure-update-account.xyz
+      </div>
+
+      <strong>Command:</strong>
+      <div class="command">
+        analyzeUrlAdvancedSync("http://example.com/login?redirect=secure-update-account.xyz")
+        <button class="copy-btn">Copy</button>
+      </div>
+
+      <div class="expected">
+        <strong>Expected Result:</strong><br>
+        <span class="status safe">SAFE</span> <strong>SAFE</strong>
+        <br><br>
+        ✓ score: 0<br>
+        ✓ trustScore: 100<br>
+        ✓ confidence: 0%<br>
+        ✓ signals: none<br><br>
+        <strong>Why:</strong> example.com is TRUSTED domain (RFC reserved) → Pass 1 returns SAFE<br>
+        <strong>⚠️ KNOWN LIMITATION:</strong> Redirect parameter analysis requires Pass 2 (onCompleted event)
+      </div>
+    </div>
+
+    <!-- TEST 7 -->
+    <div class="test-card">
+      <div class="test-num malicious">TEST 7: Homograph Attack</div>
+      <h4>paypaI.com.login-secure.xyz (capital I)</h4>
+
+      <div class="url-input">
+        http://paypaI.com.login-secure.xyz
+      </div>
+
+      <strong>Command:</strong>
+      <div class="command">
+        analyzeUrlAdvancedSync("http://paypaI.com.login-secure.xyz")
+        <button class="copy-btn">Copy</button>
+      </div>
+
+      <div class="expected">
+        <strong>Expected Result:</strong><br>
+        <span class="status malicious">MALICIOUS</span> <strong>PHISHING</strong>
+        <br><br>
+        ✓ score: 7 (high)<br>
+        ✓ trustScore: 30<br>
+        ✓ confidence: 100%<br>
+        ✓ signals: 5 detected<br><br>
+        <strong>Why:</strong> Subdomain spoofing (paypaI ≠ paypal) + keywords (login, secure) + .xyz + deep nesting
+      </div>
+    </div>
+
+  </div>
+
+  <table class="summary-table">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Attack Pattern</th>
+        <th>Expected Verdict</th>
+        <th>Detection?</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>1</strong></td>
+        <td>Keyword + Suspicious TLD</td>
+        <td><span class="status malicious">MALICIOUS</span></td>
+        <td><span class="verdict pass">✅ PASS</span></td>
+      </tr>
+      <tr>
+        <td><strong>2</strong></td>
+        <td>Subdomain Spoofing</td>
+        <td><span class="status malicious">MALICIOUS</span></td>
+        <td><span class="verdict pass">✅ PASS</span></td>
+      </tr>
+      <tr>
+        <td><strong>3</strong></td>
+        <td>URL Obfuscation (% encoding)</td>
+        <td><span class="status suspicious">SUSPICIOUS</span></td>
+        <td><span class="verdict partial">⚠️ PARTIAL</span></td>
+      </tr>
+      <tr>
+        <td><strong>4</strong></td>
+        <td>IP-based Phishing</td>
+        <td><span class="status malicious">MALICIOUS</span></td>
+        <td><span class="verdict pass">✅ PASS</span></td>
+      </tr>
+      <tr>
+        <td><strong>5</strong></td>
+        <td>Long Random Token</td>
+        <td><span class="status suspicious">SUSPICIOUS</span></td>
+        <td><span class="verdict pass">✅ PASS</span></td>
+      </tr>
+      <tr>
+        <td><strong>6</strong></td>
+        <td>Redirect Trap</td>
+        <td><span class="status safe">SAFE</span></td>
+        <td><span class="verdict partial">⚠️ LIMITATION</span></td>
+      </tr>
+      <tr>
+        <td><strong>7</strong></td>
+        <td>Homograph-style Trick</td>
+        <td><span class="status malicious">MALICIOUS</span></td>
+        <td><span class="verdict pass">✅ PASS</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <script>
+    document.querySelectorAll('.copy-btn').forEach(btn => {
+      btn.addEventListener('click', function() {
+        const cmd = this.parentElement.textContent.split('\n')[0].trim();
+        navigator.clipboard.writeText(cmd);
+        const original = this.textContent;
+        this.textContent = 'Copied!';
+        setTimeout(() => { this.textContent = original; }, 2000);
+      });
+    });
+  </script>
+</body>
+</html>

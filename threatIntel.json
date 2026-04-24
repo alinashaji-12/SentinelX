@@ -1,0 +1,35 @@
+{
+  "_comment": "Sentinel Browse — Local Threat Intelligence Database (offline, lightweight)",
+  "_version": "1.0.0",
+  "_updated": "2026-04-16",
+  "phishingDomains": [
+    "paypal-login-secure.xyz",
+    "paypal-verify-now.top",
+    "verify-account.top",
+    "verify-account-now.click",
+    "microsoft-alert-secure.xyz",
+    "ms-account-update.click"
+  ],
+  "scamKeywords": [
+    "you won",
+    "free reward",
+    "urgent action",
+    "limited time",
+    "free crypto",
+    "claim your reward",
+    "act immediately"
+  ],
+  "suspiciousTLDs": [
+    "xyz",
+    "top",
+    "click",
+    "gq",
+    "tk",
+    "ml",
+    "ga",
+    "cf",
+    "pw",
+    "zip",
+    "mov"
+  ]
+}

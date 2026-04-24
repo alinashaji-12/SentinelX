@@ -1,0 +1,492 @@
+[
+  {
+    "id": 1,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=paypal-login-secure.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||paypal-login-secure.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=paypa1-account.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||paypa1-account.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 3,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=paypal-update-required.net"
+      }
+    },
+    "condition": {
+      "urlFilter": "||paypal-update-required.net^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 4,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=amazon-update-account.xyz"
+      }
+    },
+    "condition": {
+      "urlFilter": "||amazon-update-account.xyz^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 5,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=amazon-account-alert.net"
+      }
+    },
+    "condition": {
+      "urlFilter": "||amazon-account-alert.net^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 6,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=banking-verify-now.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||banking-verify-now.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 7,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=secure-bankofamerica.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||secure-bankofamerica.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 8,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=chase-security-alert.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||chase-security-alert.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 9,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=facebook-verification.net"
+      }
+    },
+    "condition": {
+      "urlFilter": "||facebook-verification.net^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 10,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=facebook-login-secure.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||facebook-login-secure.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 11,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=apple-id-verify.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||apple-id-verify.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 12,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=apple-account-locked.net"
+      }
+    },
+    "condition": {
+      "urlFilter": "||apple-account-locked.net^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 13,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=microsoft-support-alert.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||microsoft-support-alert.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 14,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=google-account-recovery.xyz"
+      }
+    },
+    "condition": {
+      "urlFilter": "||google-account-recovery.xyz^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 15,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=crypto-wallet-recover.xyz"
+      }
+    },
+    "condition": {
+      "urlFilter": "||crypto-wallet-recover.xyz^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 16,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=phishing-site.net"
+      }
+    },
+    "condition": {
+      "urlFilter": "||phishing-site.net^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 17,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=secure-verify-login.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||secure-verify-login.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 18,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=account-suspended-alert.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||account-suspended-alert.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 19,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=login-secure-update.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||login-secure-update.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 20,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=verify-account-now.xyz"
+      }
+    },
+    "condition": {
+      "urlFilter": "||verify-account-now.xyz^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 21,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=metamask-security.net"
+      }
+    },
+    "condition": {
+      "urlFilter": "||metamask-security.net^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 22,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=coinbase-verify.net"
+      }
+    },
+    "condition": {
+      "urlFilter": "||coinbase-verify.net^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 23,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=malicious.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||malicious.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 24,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=login-secure-account.xyz"
+      }
+    },
+    "condition": {
+      "urlFilter": "||login-secure-account.xyz^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 25,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=paypal-secure-login.xyz"
+      }
+    },
+    "condition": {
+      "urlFilter": "||paypal-secure-login.xyz^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 26,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=amazon-prime-verify.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||amazon-prime-verify.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 27,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=amazon-security-notice.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||amazon-security-notice.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 28,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=bankofamerica-alert.net"
+      }
+    },
+    "condition": {
+      "urlFilter": "||bankofamerica-alert.net^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 29,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=wells-fargo-verify.net"
+      }
+    },
+    "condition": {
+      "urlFilter": "||wells-fargo-verify.net^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 30,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=instagram-verify-account.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||instagram-verify-account.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 31,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=twitter-support-team.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||twitter-support-team.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 32,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=binance-secure-login.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||binance-secure-login.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 33,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=nft-mint-free.xyz"
+      }
+    },
+    "condition": {
+      "urlFilter": "||nft-mint-free.xyz^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 34,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=free-gift-claim.xyz"
+      }
+    },
+    "condition": {
+      "urlFilter": "||free-gift-claim.xyz^",
+      "resourceTypes": ["main_frame"]
+    }
+  },
+  {
+    "id": 35,
+    "priority": 2,
+    "action": {
+      "type": "redirect",
+      "redirect": {
+        "extensionPath": "/warning.html?source=dnr&domain=urgent-action-required.com"
+      }
+    },
+    "condition": {
+      "urlFilter": "||urgent-action-required.com^",
+      "resourceTypes": ["main_frame"]
+    }
+  }
+]

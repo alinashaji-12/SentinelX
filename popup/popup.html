@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sentinel Browse</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="popup" role="application" aria-label="Sentinel security dashboard">
+      <header class="header">
+        <h1 class="title">Sentinel Browse</h1>
+        <p class="subtitle">Security Dashboard</p>
+      </header>
+
+      <section class="url-section" aria-label="Latest analyzed site">
+        <p class="url-label">Latest analyzed site</p>
+        <p class="url" id="siteUrl">Loading…</p>
+      </section>
+
+      <section class="status-section" aria-label="Status summary">
+        <div class="status-card">
+          <p class="status-label">Status</p>
+          <p class="status" id="status">—</p>
+        </div>
+        <div class="confidence-card">
+          <p class="confidence-label">Risk (0–100)</p>
+          <p class="confidence" id="riskScore">—</p>
+        </div>
+      </section>
+
+      <section class="trust-score-section" aria-label="Trust score">
+        <p class="trust-score-label">Trust Score</p>
+        <div class="trust-score-bar" aria-hidden="true">
+          <div class="trust-score-fill" id="trustFill" style="width:0%"></div>
+          <div class="trust-score-value" id="trustScore">—</div>
+        </div>
+      </section>
+
+      <section class="attack-type-section" aria-label="Verdict details">
+        <p class="section-label">Verdict</p>
+        <div class="attack-type-badge">
+          <span class="icon" id="verdictIcon" aria-hidden="true">🛡️</span>
+          <span class="label" id="attackType">—</span>
+        </div>
+        <p class="attack-description" id="domainReputation">Domain reputation: —</p>
+        <p class="attack-description" id="domainMeta">Domain intel: �</p>
+        <p class="attack-description" id="behaviorRisk">Behavior alerts: —</p>
+        <p class="attack-description" id="tldRisk">TLD risk: —</p>
+      </section>
+
+      <section class="explanation-section" aria-label="Explainability">
+        <p class="section-label">Why this site is safe/unsafe</p>
+        <p class="explanation" id="xai">Loading…</p>
+      </section>
+
+      <section class="signals-section" aria-label="Signals triggered">
+        <p class="section-label">Signals triggered</p>
+        <ul class="signals-list" id="signalsList"></ul>
+      </section>
+
+      <section class="explanation-section" aria-label="Advanced">
+        <p class="section-label">Advanced</p>
+        <p class="explanation" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0;">
+          <span style="font-weight:700;">Enable Developer Mode</span>
+          <label style="display:inline-flex;align-items:center;gap:8px;">
+            <input id="devModeToggle" type="checkbox" />
+            <span style="font-size:12px;color:var(--muted);">dev_mode</span>
+          </label>
+        </p>
+      </section>
+
+      <div class="action-buttons" aria-label="Actions">
+        <button class="btn btn-secondary" id="reportBtn" type="button">Report this site</button>
+        <button class="btn btn-secondary" id="markSafeBtn" type="button">Mark safe</button>
+        <button class="btn btn-secondary" id="refreshBtn" type="button">Refresh</button>
+        <button class="btn btn-close" id="closeBtn" type="button" aria-label="Close">×</button>
+      </div>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
+

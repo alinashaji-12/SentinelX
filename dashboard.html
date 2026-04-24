@@ -1,0 +1,166 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sentinel Browse Dashboard â€” Adaptive Intelligence</title>
+    <meta name="description" content="Sentinel Browse threat history, adaptive intelligence profile, and URL simulation dashboard." />
+    <link rel="stylesheet" href="./dashboard.css" />
+  </head>
+  <body>
+    <main class="dashboard">
+
+      <!-- â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+      <header class="header">
+        <h1>ðŸ›¡ï¸ Sentinel Browse Dashboard</h1>
+        <p>Threat history Â· Adaptive intelligence profile Â· URL simulation</p>
+      </header>
+
+      <!-- â”€â”€ Filter bar + actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+      <section class="filters" aria-label="Table filters">
+        <button type="button" class="filter-btn active" data-filter="all">All</button>
+        <button type="button" class="filter-btn malicious" data-filter="malicious">Malicious Only</button>
+        <button type="button" class="filter-btn suspicious" data-filter="suspicious">Suspicious Only</button>
+        <button type="button" class="filter-btn bypassed" data-filter="bypassed">Bypassed Only</button>
+        <button type="button" class="filter-btn" id="clearHistoryBtn">Clear History</button>
+        <button type="button" class="filter-btn generate-report" id="generateReportBtn">Generate Report</button>
+        <button type="button" class="filter-btn export-report" id="exportReportBtn" hidden>Export JSON</button>
+      </section>
+
+      <!-- â”€â”€ Report card (shown on demand) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+      <section class="report-card" id="reportCard" hidden aria-label="Scan report">
+        <div class="report-header">
+          <div>
+            <h2>Scan Report</h2>
+            <p id="reportTimestamp">Generated on demand from stored scan history.</p>
+          </div>
+        </div>
+        <div class="report-grid" id="reportGrid"></div>
+        <div class="report-details">
+          <div class="report-detail">
+            <span class="detail-label">Most Common Threat Type</span>
+            <strong id="reportThreatType">â€”</strong>
+          </div>
+          <div class="report-detail">
+            <span class="detail-label">Most Frequent Malicious Domain</span>
+            <strong id="reportMaliciousDomain">â€”</strong>
+          </div>
+        </div>
+        <div class="report-json">
+          <div class="report-json-header"><h3>JSON Preview</h3></div>
+          <pre id="reportJsonOutput"></pre>
+        </div>
+      </section>
+
+      <!-- â”€â”€ Adaptive Intelligence Panel â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+      <section class="adaptive-card" id="adaptiveCard" aria-label="Adaptive intelligence">
+        <div class="adaptive-card-header">
+          <div>
+            <h2>âš¡ Adaptive Intelligence</h2>
+            <p>Live system profile â€” built from your real browsing patterns. Improves over time.</p>
+          </div>
+        </div>
+        <div id="adaptiveStatsPanel" class="adaptive-panel-content">
+          <p class="empty-state" style="margin:0">Loadingâ€¦</p>
+        </div>
+      </section>
+
+      <section class="adaptive-card" aria-label="Latest analysis intelligence">
+        <div class="adaptive-card-header">
+          <div>
+            <h2>Latest Analysis Intelligence</h2>
+            <p>Unified final risk, AI explainability, and domain intelligence from the most recent event.</p>
+          </div>
+        </div>
+        <div id="latestIntelPanel" class="adaptive-panel-content">
+          <p class="empty-state" style="margin:0">Loading…</p>
+        </div>
+      </section>
+
+      <!-- â”€â”€ Simulation Lab â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+      <section class="lab-card" aria-label="URL simulation lab">
+        <div class="lab-header">
+          <div>
+            <h2>ðŸ”¬ Simulation Lab</h2>
+            <p>Test any URL against the full detection engine â€” same heuristics used during real browsing.</p>
+          </div>
+        </div>
+        <div class="simulator-form">
+          <input
+            id="simulationUrl"
+            type="text"
+            placeholder="https://paypal-verify-account.xyz/login"
+            spellcheck="false"
+            autocomplete="off"
+            aria-label="URL to analyse"
+          />
+          <button type="button" class="filter-btn generate-report" id="runSimulationBtn">
+            Analyse
+          </button>
+        </div>
+        <div id="simulationResult" class="simulation-result" hidden aria-label="Simulation result">
+          <div class="simulation-summary">
+            <article class="report-metric">
+              <span class="metric-label">Verdict</span>
+              <strong id="simulationStatus" class="metric-value">â€”</strong>
+            </article>
+            <article class="report-metric">
+              <span class="metric-label">Confidence</span>
+              <strong id="simulationConfidence" class="metric-value">0%</strong>
+            </article>
+            <article class="report-metric">
+              <span class="metric-label">Trust Score</span>
+              <strong id="simulationTrustScore" class="metric-value">0/100</strong>
+            </article>
+          </div>
+          <div class="simulation-panels">
+            <article class="report-detail">
+              <span class="detail-label">Detection Reasons</span>
+              <div id="simulationReasons"></div>
+            </article>
+            <article class="report-detail">
+              <span class="detail-label">Modules Triggered</span>
+              <div id="simulationSources"></div>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <!-- â”€â”€ Privacy notice â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+      <section class="privacy-banner" role="note">
+        ðŸ”’ All analysis is performed locally on your device. No URLs, browsing data, or personal
+        information are sent to any external server. Reputation and profile data stays inside this
+        extension's local storage only.
+      </section>
+
+      <!-- â”€â”€ Threat history table â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
+      <section class="table-wrap" aria-label="Threat history">
+        <table>
+          <thead>
+            <tr>
+              <th>URL</th>
+              <th>Status</th>
+              <th>Trust Score</th>
+              <th>Confidence</th>
+              <th>User Action</th>
+              <th>Reasons</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody id="historyBody"></tbody>
+        </table>
+        <p id="emptyState" class="empty-state" hidden>No history found for the selected filter.</p>
+      </section>
+
+    </main>
+
+    <!--
+      Load detectionEngine.js FIRST so SentinelDetectionEngine is available
+      in the page context for the simulation panel (no service worker needed).
+    -->
+    <script src="./detectionEngine.js"></script>
+    <!-- dashboard.js is a plain script â€” NOT type="module" -->
+    <script src="./dashboard.js"></script>
+  </body>
+</html>
+
