@@ -1,4 +1,4 @@
-/* global chrome */
+﻿/* global chrome */
 
 "use strict";
 
@@ -10,6 +10,12 @@ const STORAGE_KEYS = {
   DEV_MODE: "dev_mode",
 };
 
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// âš¡ THREAT ANALYSIS DASHBOARD â€” State
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// Persists across Refresh clicks within the same popup session.
+const eventLog = [];
+
 function $(id) {
   return document.getElementById(id);
 }
@@ -19,10 +25,10 @@ function clamp(n, min, max) {
 }
 
 function statusIcon(status) {
-  if (status === "safe") return "✅";
-  if (status === "suspicious") return "⚠️";
-  if (status === "malicious") return "🚫";
-  return "🛡️";
+  if (status === "safe") return "âœ…";
+  if (status === "suspicious") return "âš ï¸";
+  if (status === "malicious") return "ðŸš«";
+  return "ðŸ›¡ï¸";
 }
 
 function formatAttackType(type) {
@@ -34,7 +40,7 @@ function formatAttackType(type) {
     BEHAVIORAL: "Behavioral",
     SAFE: "Safe",
   };
-  return map[type] || type || "—";
+  return map[type] || type || "â€”";
 }
 
 function storageGet(keys) {
@@ -129,7 +135,7 @@ function setTrustMeter(trustScore) {
   if (trust === null) {
     fill.style.width = "0%";
     fill.style.background = "#9ca3af";
-    label.textContent = "—";
+    label.textContent = "â€”";
     return;
   }
 
@@ -172,22 +178,169 @@ function renderXai(xaiEl, breakdown, fallbackReasons, data = null) {
       .slice(0, 6)
       .map(([k, v]) => `${k}: ${v}`);
     if (lines.length) {
-      xaiEl.textContent = `${aiPrefix} • ${lines.join(" • ")}`;
+      xaiEl.textContent = `${aiPrefix} â€¢ ${lines.join(" â€¢ ")}`;
       return;
     }
   }
   const reasons = Array.isArray(fallbackReasons) ? fallbackReasons.filter(Boolean).slice(0, 3) : [];
   xaiEl.textContent = reasons.length
-    ? `${aiPrefix} • ${reasons.join(" • ")}`
+    ? `${aiPrefix} â€¢ ${reasons.join(" â€¢ ")}`
     : aiPrefix;
 }
 
 function formatReputation(rep) {
-  if (!rep || typeof rep !== "object") return "—";
+  if (!rep || typeof rep !== "object") return "â€”";
   const suspiciousHits = Number(rep.suspiciousHits || 0);
   const maliciousHits = Number(rep.maliciousHits || 0);
   const bypassCount = Number(rep.bypassCount || 0);
-  return `${maliciousHits} malicious · ${suspiciousHits} suspicious · ${bypassCount} bypass`;
+  return `${maliciousHits} malicious Â· ${suspiciousHits} suspicious Â· ${bypassCount} bypass`;
+}
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// âš¡ THREAT ANALYSIS DASHBOARD â€” Rendering
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/**
+ * Renders the animated risk bar inside #attack-dashboard.
+ * Drives width, gradient colour, and label from a 0â€“100 score.
+ * @param {number} score - 0..100
+ * @param {string} status - "safe" | "suspicious" | "malicious"
+ */
+function renderRisk(score, status) {
+  const fill  = $("risk-bar");
+  const label = $("riskBarLabel");
+  const liveDot = $("dashLiveDot");
+  if (!fill) return;
+
+  const s = clamp(Math.round(score ?? 0), 0, 100);
+  const level = status === "malicious" ? "malicious"
+              : status === "suspicious" || s > 40 ? "suspicious"
+              : "safe";
+
+  // Let the browser paint at 0 first so the transition always animates
+  requestAnimationFrame(() => {
+    fill.style.width   = s + "%";
+    fill.dataset.level = level;
+    if (label) label.textContent = `${s}/100`;
+  });
+
+  // Mark live dot stale if no real analysis is available
+  if (liveDot) {
+    if (score == null || score === 0) {
+      liveDot.classList.add("stale");
+    } else {
+      liveDot.classList.remove("stale");
+    }
+  }
+}
+
+/**
+ * Infers a severity class for a signal string.
+ * Used to colour-code chips in the Active Signals panel.
+ * @param {string} signal
+ * @returns {"malicious"|"suspicious"|"safe"}
+ */
+function inferSignalSeverity(signal) {
+  const s = String(signal || "").toLowerCase();
+  if (
+    s.includes("phishing") || s.includes("malware") ||
+    s.includes("hijack") || s.includes("keylogger") ||
+    s.includes("ransomware") || s.includes("obfuscated")
+  ) return "malicious";
+  if (
+    s.includes("redirect") || s.includes("iframe") ||
+    s.includes("injection") || s.includes("suspicious") ||
+    s.includes("scam") || s.includes("brand") ||
+    s.includes("tld") || s.includes("domain")
+  ) return "suspicious";
+  return "safe";
+}
+
+/**
+ * Renders colour-coded signal chips in #signals-list (inside #attack-dashboard).
+ * @param {string[]} signals
+ */
+function renderDashboardSignals(signals) {
+  const container = $("signals-list");
+  if (!container) return;
+  container.innerHTML = "";
+
+  const safe = Array.isArray(signals) ? signals.filter(Boolean).slice(0, 16) : [];
+
+  if (!safe.length) {
+    const chip = document.createElement("span");
+    chip.className = "dash-signal-chip chip-none";
+    chip.textContent = "No signals detected";
+    container.appendChild(chip);
+    return;
+  }
+
+  // Severity icons for quick visual scanning
+  const ICONS = { malicious: "ðŸ›‘", suspicious: "âš ï¸", safe: "â„¹ï¸" };
+
+  for (const signal of safe) {
+    const severity = inferSignalSeverity(signal);
+    const chip = document.createElement("span");
+    chip.className = `dash-signal-chip chip-${severity}`;
+    chip.title     = signal;
+    chip.textContent = `${ICONS[severity]} ${String(signal).replace(/_/g, " ")}`;
+    container.appendChild(chip);
+  }
+}
+
+/**
+ * Adds a new event to the detection timeline and re-renders.
+ * Called once per renderDashboard() with the current analysis verdict.
+ * @param {string} signal  - readable description
+ * @param {string} status  - "safe" | "suspicious" | "malicious" | "info"
+ */
+function logEvent(signal, status = "info") {
+  eventLog.unshift({          // newest first
+    signal: String(signal || ""),
+    status: ["safe", "suspicious", "malicious", "info"].includes(status) ? status : "info",
+    time:   new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+  });
+  if (eventLog.length > 20) eventLog.length = 20;   // cap at 20 entries
+  renderTimeline();
+}
+
+/**
+ * Renders the timeline list from the in-memory eventLog array.
+ */
+function renderTimeline() {
+  const tl = $("timeline");
+  if (!tl) return;
+  tl.innerHTML = "";
+
+  if (!eventLog.length) {
+    const empty = document.createElement("div");
+    empty.className = "timeline-empty";
+    empty.textContent = "No events recorded yet.";
+    tl.appendChild(empty);
+    return;
+  }
+
+  for (const entry of eventLog) {
+    const row = document.createElement("div");
+    row.className = "timeline-entry";
+
+    const dot = document.createElement("span");
+    dot.className = `tl-dot tl-dot-${entry.status}`;
+
+    const time = document.createElement("span");
+    time.className = "tl-time";
+    time.textContent = entry.time;
+
+    const sig = document.createElement("span");
+    sig.className = "tl-signal";
+    sig.textContent = entry.signal;
+    sig.title       = entry.signal;
+
+    row.appendChild(dot);
+    row.appendChild(time);
+    row.appendChild(sig);
+    tl.appendChild(row);
+  }
 }
 
 async function renderDashboard() {
@@ -198,10 +351,10 @@ async function renderDashboard() {
 
   const analysis = stored[STORAGE_KEYS.LAST_ANALYSIS] || null;
 
-  const siteUrl = analysis?.url || tab?.url || "—";
+  const siteUrl = analysis?.url || tab?.url || "â€”";
   $("siteUrl").textContent = siteUrl;
 
-  const status = analysis?.status || "—";
+  const status = analysis?.status || "â€”";
   const statusEl = $("status");
   statusEl.textContent = status;
   statusEl.classList.remove("safe", "suspicious", "malicious");
@@ -228,9 +381,9 @@ async function renderDashboard() {
   if (analysis?.serverLocation) {
     metaBits.push(`server ${analysis.serverLocation}`);
   }
-  $("domainMeta").textContent = `Domain intel: ${metaBits.length ? metaBits.join(" · ") : "not available"}`;
+  $("domainMeta").textContent = `Domain intel: ${metaBits.length ? metaBits.join(" Â· ") : "not available"}`;
 
-  // Current-tab behavior risk (0–100) from background in-memory map
+  // Current-tab behavior risk (0â€“100) from background in-memory map
   let behaviorRisk = null;
   try {
     const tabId = tab?.id;
@@ -251,7 +404,7 @@ async function renderDashboard() {
   const behaviorParts = [];
   if (typeof behaviorRisk === "number") behaviorParts.push(`tab risk ${behaviorRisk}/100`);
   if (behaviorSignals.length) behaviorParts.push(behaviorSignals.slice(0, 3).join(", "));
-  $("behaviorRisk").textContent = `Behavior alerts: ${behaviorParts.length ? behaviorParts.join(" · ") : "none"}`;
+  $("behaviorRisk").textContent = `Behavior alerts: ${behaviorParts.length ? behaviorParts.join(" Â· ") : "none"}`;
 
   const tldHigh = Array.isArray(analysis?.signals) && (
     analysis.signals.includes("tldRiskHigh") ||
@@ -261,6 +414,31 @@ async function renderDashboard() {
 
   renderXai($("xai"), analysis?.breakdown, analysis?.reasons || [], analysis);
   renderSignals($("signalsList"), analysis?.signals || []);
+
+  // â”€â”€ THREAT ANALYSIS DASHBOARD â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // Populate the three dashboard widgets from data already fetched above.
+  renderRisk(risk, analysis?.status || "safe");
+  renderDashboardSignals(analysis?.signals || []);
+
+  const _tlStatus = (analysis?.status || "info").toUpperCase();
+  const _tlType   = analysis?.attackType || "scan complete";
+  const _tlLabel  = analysis?.status
+    ? (_tlStatus + " \u2014 " + _tlType + " (risk " + risk + "/100)")
+    : "No analysis data yet";
+  logEvent(_tlLabel, analysis?.status || "info");
+
+  if (Array.isArray(analysis?.signals)) {
+    const _HIGH_SIGS = [
+      "phishing_form", "clipboard_hijack", "malware_signature",
+      "keylogger_detected", "hidden_iframe", "obfuscated_script",
+      "external_script_injection",
+    ];
+    for (const _sig of analysis.signals) {
+      if (_HIGH_SIGS.includes(_sig)) {
+        logEvent("Signal: " + _sig.replace(/_/g, " "), inferSignalSeverity(_sig));
+      }
+    }
+  }
 
   // If the latest analyzed site isn't the active tab, make that visible.
   if (tab?.url && analysis?.url && tab.url !== analysis.url) {

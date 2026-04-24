@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Sentinel Browse</title>
     <link rel="stylesheet" href="popup.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   </head>
   <body>
     <div class="popup" role="application" aria-label="Sentinel security dashboard">
@@ -57,6 +59,39 @@
       <section class="signals-section" aria-label="Signals triggered">
         <p class="section-label">Signals triggered</p>
         <ul class="signals-list" id="signalsList"></ul>
+      </section>
+
+      <!-- ⚡ THREAT ANALYSIS DASHBOARD -->
+      <section id="attack-dashboard" aria-label="Threat Analysis Dashboard">
+        <div class="dash-header">
+          <span class="dash-icon">⚡</span>
+          <h3 class="dash-title">Threat Analysis</h3>
+          <span class="dash-live" id="dashLiveDot" aria-hidden="true"></span>
+        </div>
+
+        <!-- Risk Bar -->
+        <div class="dash-block">
+          <div class="dash-block-label">Risk Level</div>
+          <div class="risk-bar-track" role="progressbar" aria-label="Risk score" id="riskBarTrack">
+            <div class="risk-bar-fill" id="risk-bar"></div>
+            <span class="risk-bar-label" id="riskBarLabel">—</span>
+          </div>
+          <div class="risk-bar-scale">
+            <span>Safe</span><span>Suspicious</span><span>Critical</span>
+          </div>
+        </div>
+
+        <!-- Signal chips -->
+        <div class="dash-block">
+          <div class="dash-block-label">Active Signals</div>
+          <div class="dash-signals" id="signals-list"></div>
+        </div>
+
+        <!-- Event timeline -->
+        <div class="dash-block">
+          <div class="dash-block-label">Detection Timeline</div>
+          <div class="dash-timeline" id="timeline" aria-live="polite"></div>
+        </div>
       </section>
 
       <section class="explanation-section" aria-label="Advanced">
