@@ -18,6 +18,17 @@ let _phishingUiAlertSent = false;
 const _networkAlertSeen = new Set();
 const _MAX_NETWORK_ALERTS = 12;
 
+/**
+ * Per-page deduplication guard for overlay messages.
+ *
+ * sendOverlayWithRetry in background.js retries on delivery failure.
+ * If the first send succeeds but the callback fires late (race), the
+ * second attempt may also be delivered. We key on status+rounded-risk
+ * so legitimate severity escalations (suspicious → malicious) still show.
+ */
+const _overlayShownKeys = new Set();
+const _OVERLAY_COOLDOWN_MS = 5000; // 5 s between same-key overlays
+
 document.addEventListener("DOMContentLoaded", () => {
   console.log("[Sentinel] Content script ready");
 });
@@ -30,6 +41,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   if (message?.type === "sentinel:show-overlay") {
+    // ── [Sentinel AI] Structured receive log ─────────────────────────
+    const _rcvRisk = message.finalScore ?? message.finalRisk ?? message.score ?? 0;
+    console.log("[Sentinel AI] Overlay received", {
+      status:   message.status,
+      risk:     _rcvRisk,
+      signals:  message.signals || [],
+      decision: message.status === "malicious" ? "FULL_SCREEN" : "CARD",
+    });
+
+    // ── Deduplication gate ───────────────────────────────────────────
+    // Key: status + risk bucketed to nearest 10 (so 42 and 48 share a key)
+    const _dedupeKey = `${message.status}:${Math.round(_rcvRisk / 10) * 10}`;
+    const _now = Date.now();
+    const _lastShown = _overlayShownKeys.get(_dedupeKey);
+
+    if (_lastShown && (_now - _lastShown) < _OVERLAY_COOLDOWN_MS) {
+      console.debug("[Sentinel AI] Overlay deduplicated — cooldown active", _dedupeKey);
+      sendResponse({ ok: true, deduplicated: true });
+      return;
+    }
+    _overlayShownKeys.set(_dedupeKey, _now);
+
     // Cache debug context for dev_mode overlay rendering (best-effort).
     try {
       window.__sentinel_last_overlay_signals = Array.isArray(message.signals) ? message.signals : [];
@@ -48,6 +81,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         signals: message.signals,
         status: "malicious",
       });
+      playAlertSound("malicious");   // ensure alarm plays on the malicious path
       sendResponse({ ok: true });
       return;
     }

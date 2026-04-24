@@ -1607,14 +1607,26 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
  */
 const TAB_BEHAVIOR_RISK = new Map();
 
-function sendOverlayWithRetry(tabId, payload, retries = 3) {
-  chrome.tabs.sendMessage(tabId, payload, (response) => {
-    if (chrome.runtime.lastError && retries > 0) {
-      setTimeout(() => {
-        sendOverlayWithRetry(tabId, payload, retries - 1);
-      }, 300);
-    }
-  });
+function sendOverlayWithRetry(tabId, payload, retries = 2) {
+  // Idempotent: if the first delivery succeeds (response received),
+  // cancel any pending retries so the overlay is shown exactly once.
+  let delivered = false;
+
+  function attempt(attemptsLeft) {
+    if (delivered) return;
+    chrome.tabs.sendMessage(tabId, payload, (response) => {
+      if (chrome.runtime.lastError) {
+        if (attemptsLeft > 0) {
+          // Linear back-off: 400ms, 800ms
+          setTimeout(() => attempt(attemptsLeft - 1), 400 * (retries - attemptsLeft + 1));
+        }
+      } else {
+        delivered = true;  // stop any further retries
+      }
+    });
+  }
+
+  attempt(retries);
 }
 
 /**
@@ -1707,6 +1719,32 @@ chrome.webNavigation.onCompleted.addListener((details) => {
   // ── Step 2: build overlay payload ─────────────────────────────────────
   const isSafe       = result.status === "safe";
   const isSuspicious = result.status === "suspicious";
+  const isMalicious  = result.status === "malicious";
+
+  // Compute displayable risk score (prefer finalRiskScore, fall back to score*10)
+  const displayRisk = typeof result.finalRiskScore === "number"
+    ? result.finalRiskScore
+    : (typeof result.score === "number" ? Math.round(result.score * 10) : 0);
+
+  // ── [Sentinel AI] Structured overlay decision log ─────────────────────
+  console.log("[Sentinel AI] Overlay decision", {
+    url,
+    status:    result.status,
+    risk:      displayRisk,
+    signals:   Array.isArray(result.signals) ? result.signals : [],
+    trustTier: result.trustTier || "medium",
+    mlScore:   result.mlRiskScore ?? null,
+    decision:  displayRisk >= 40 ? "SHOW" : (isMalicious ? "SHOW (malicious override)" : "SKIP (low risk)"),
+    evaluator: threatDecision ? { shouldAlert: threatDecision.shouldAlert, severity: threatDecision.severity } : null,
+  });
+
+  // ── Risk floor gate: skip overlay for genuinely low-risk pages ─────────
+  // Malicious always shows (redirected to warning.html above, but defence-in-depth).
+  // Suspicious/safe need risk >= 40 to justify IPC cost and user disruption.
+  if (!isMalicious && displayRisk < 40) {
+    console.log("[Sentinel AI] Overlay skipped — risk below threshold", displayRisk, "/ 40");
+    return;
+  }
 
   const overlayMessage = isSafe
     ? "Site verified — no threats detected"
@@ -1739,7 +1777,7 @@ chrome.webNavigation.onCompleted.addListener((details) => {
       ? "Do not enter passwords or personal information on this page."
       : "",
     // Use evaluator reasoning if available, fall back to original reasons
-    reasons: finalReasons.length > 0 ? finalReasons : 
+    reasons: finalReasons.length > 0 ? finalReasons :
       (isSuspicious && Array.isArray(result.reasons) ? result.reasons.slice(0, 3) : []),
     // Expose final risk score and severity for overlay display
     finalRisk: threatDecision?.finalRisk ?? (result.finalRiskScore || result.score),
