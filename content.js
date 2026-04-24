@@ -1473,3 +1473,232 @@ function installNetworkMonitor() {
 (function initNetworkMonitor() {
   installNetworkMonitor();
 })();
+
+// ══════════════════════════════════════════════════════════════════════
+// SECTION 12 — RUNTIME SCRIPT SANDBOXING
+// ══════════════════════════════════════════════════════════════════════
+//
+// Intercepts dangerous runtime APIs to detect:
+//   1. Obfuscated eval() calls — long code or code using atob()
+//   2. External script injection — <script src> pointing off-domain
+//   3. Suspicious fetch() targets — URL paths matching attack patterns
+//
+// Architecture note:
+//   The eval hook runs in the MAIN world (injected via <script> tag) so it
+//   intercepts the real window.eval before page scripts see it.
+//   It communicates back via postMessage using a per-load nonce token,
+//   identical to the behaviorMonitor.js probe pattern.
+//   All final signal dispatch goes through reportSignal() → BEHAVIOR_ALERT.
+//
+// False-positive guards:
+//   • Safe domains (google.com, christuniversity.in, etc.) skip all hooks
+//   • eval size threshold: >1000 chars (minified bundles are common & benign)
+//   • External scripts on the same root domain are NOT flagged
+//   • Rate limit: max 5 sandboxing alerts per page load
+
+// ── Guard: skip sandboxing on safe/extension pages ────────────────────
+if (
+  !["chrome-extension:", "chrome:", "about:"].includes(location.protocol) &&
+  !["google.com", "youtube.com", "microsoft.com", "christuniversity.in",
+    "github.com", "gstatic.com", "doubleclick.net", "googletagmanager.com",
+  ].some(d => location.hostname === d || location.hostname.endsWith(`.${d}`))
+) {
+
+  // ── Nonce token for MAIN-world ↔ isolated-world postMessage ──────────
+  const _SANDBOX_TOKEN = `sentinel-sandbox-${Math.random().toString(36).slice(2)}`;
+
+  // ── Rate limiter ──────────────────────────────────────────────────────
+  const _sandboxAlertCounts = Object.create(null);
+  const _SANDBOX_RATE_LIMITS = {
+    obfuscated_script:        3,
+    external_script_injection: 5,
+    suspicious_network_call:  4,
+  };
+
+  function _sandboxRateLimited(signal) {
+    _sandboxAlertCounts[signal] = (_sandboxAlertCounts[signal] || 0) + 1;
+    return _sandboxAlertCounts[signal] > (_SANDBOX_RATE_LIMITS[signal] ?? 3);
+  }
+
+  /**
+   * Reports a runtime sandboxing signal to background.js via BEHAVIOR_ALERT.
+   * Mirrors the reportBehavior() API in behaviorMonitor.js.
+   *
+   * @param {string} signal  — machine-readable signal identifier
+   * @param {object} [details] — optional metadata
+   */
+  function reportSignal(signal, details = {}) {
+    if (_sandboxRateLimited(signal)) return;
+
+    console.warn(`[Sentinel-Sandbox] 🚨 Signal detected: ${signal}`, details);
+
+    try {
+      chrome.runtime.sendMessage({
+        type:       "BEHAVIOR_ALERT",
+        event:      signal,
+        severity:   signal === "obfuscated_script" ? "high" : "medium",
+        confidence: signal === "external_script_injection" ? "HIGH" : "MEDIUM",
+        userInitiated: false,
+        url:        location.href,
+        details:    { ...details, domain: location.hostname },
+        timestamp:  Date.now(),
+      }).catch(() => {});
+    } catch {
+      // Extension context invalidated — best effort only.
+    }
+  }
+
+  // ── 1. EVAL HOOK (MAIN world, via injected <script>) ─────────────────
+  // We inject this into the MAIN world so it wraps window.eval before any
+  // page script runs.  Communicates back via postMessage with _SANDBOX_TOKEN.
+  (function installEvalHook() {
+    const probeCode = `
+(function(TOKEN) {
+  "use strict";
+  if (window.__sentinel_eval_hooked) return;
+  window.__sentinel_eval_hooked = true;
+
+  const _originalEval = window.eval;
+  window.eval = function sentinelEval(code) {
+    try {
+      const src = String(code || "");
+      // Flag if: code is very large (>1000 chars) OR uses atob() for obfuscation
+      if (src.length > 1000 || src.includes("atob(")) {
+        try {
+          window.postMessage({
+            _sentinelSandbox: TOKEN,
+            signal: "obfuscated_script",
+            details: {
+              codeLength: src.length,
+              hasAtob: src.includes("atob("),
+              preview: src.slice(0, 120),
+            },
+          }, "*");
+        } catch {}
+      }
+    } catch {}
+    return _originalEval.call(this, code);
+  };
+  // Preserve toString() so feature-detection doesn't break
+  window.eval.toString = () => _originalEval.toString();
+})(${JSON.stringify(_SANDBOX_TOKEN)});
+`.trim();
+
+    try {
+      const script = document.createElement("script");
+      script.textContent = probeCode;
+      (document.head || document.documentElement).appendChild(script);
+      script.remove();
+    } catch {
+      // CSP blocks inline script injection — eval hook unavailable on this origin.
+      console.debug("[Sentinel-Sandbox] eval hook blocked by CSP");
+    }
+  })();
+
+  // ── Relay: receive postMessage signals from MAIN world eval hook ──────
+  window.addEventListener("message", (event) => {
+    if (event.source !== window) return;
+    if (!event.data || event.data._sentinelSandbox !== _SANDBOX_TOKEN) return;
+
+    const { signal, details } = event.data;
+    if (signal && typeof signal === "string") {
+      reportSignal(signal, details || {});
+    }
+  }, { passive: true });
+
+  // ── 2. EXTERNAL SCRIPT INJECTION OBSERVER ────────────────────────────
+  // Watches for dynamically injected <script src="..."> elements where
+  // the src points to a different root domain than the current page.
+  // This catches post-load script injection (XSS, supply-chain attacks).
+  (function installScriptInjectionObserver() {
+    const pageRoot = _getRootDomain(location.hostname.toLowerCase());
+
+    function checkScriptNode(node) {
+      if (!(node instanceof HTMLScriptElement)) return;
+      const src = node.getAttribute("src");
+      if (!src) return; // inline scripts are handled by the eval hook
+
+      const u = _safeParseUrl(src);
+      if (!u) return;
+
+      const srcRoot = _getRootDomain(u.hostname.toLowerCase());
+      // Same root domain → legitimate (CDN subdomains, etc.)
+      if (srcRoot && srcRoot === pageRoot) return;
+      // Relative URL with no hostname → same origin → safe
+      if (!u.hostname) return;
+
+      reportSignal("external_script_injection", {
+        src: src.slice(0, 200),
+        srcDomain: u.hostname,
+        pageDomain: location.hostname,
+      });
+    }
+
+    const scriptObserver = new MutationObserver((mutations) => {
+      for (const { addedNodes } of mutations) {
+        for (const node of addedNodes) {
+          if (node instanceof HTMLScriptElement) {
+            checkScriptNode(node);
+          } else if (node instanceof HTMLElement) {
+            // Check descendant scripts (e.g., injected document fragment)
+            node.querySelectorAll?.("script[src]")
+              .forEach(s => checkScriptNode(s));
+          }
+        }
+      }
+    });
+
+    scriptObserver.observe(document.documentElement, {
+      childList: true,
+      subtree:   true,
+    });
+
+    // Scan scripts already present at injection time
+    document.querySelectorAll("script[src]")
+      .forEach(s => checkScriptNode(s));
+  })();
+
+  // ── 3. SUSPICIOUS FETCH PATTERN MONITOR ──────────────────────────────
+  // Supplements Section 11's network monitor with signal-specific detection:
+  // catches fetch() calls whose URL string contains known attack path patterns
+  // even when the domain itself looks clean (e.g. exfil via legit CDN).
+  (function installSuspiciousFetchMonitor() {
+    const _SUSPICIOUS_FETCH_PATTERNS = [
+      "bitcoin", "crypto", "wallet", "seed-phrase",
+      "exfil", "c2", "beacon",
+      "/cmd", "/shell", "/exec",
+    ];
+
+    // Operate in isolated world — window.fetch here is the page's real fetch
+    // (the MAIN-world hook in Section 11 already exists; this isolated-world
+    // wrapper only adds the signal-specific path check without duplicating
+    // the base network monitor logic).
+    try {
+      const _origFetchForSandbox = window.fetch;
+      if (typeof _origFetchForSandbox === "function" &&
+          !window.__sentinel_sandbox_fetch_hooked) {
+        window.__sentinel_sandbox_fetch_hooked = true;
+
+        window.fetch = function (...args) {
+          try {
+            const rawUrl = typeof args[0] === "string"
+              ? args[0]
+              : (args[0] instanceof URL ? args[0].href : (args[0]?.url || ""));
+            const urlLower = rawUrl.toLowerCase();
+
+            if (_SUSPICIOUS_FETCH_PATTERNS.some(p => urlLower.includes(p))) {
+              reportSignal("suspicious_network_call", {
+                url:     rawUrl.slice(0, 200),
+                pattern: _SUSPICIOUS_FETCH_PATTERNS.find(p => urlLower.includes(p)),
+              });
+            }
+          } catch {}
+          return _origFetchForSandbox.apply(this, args);
+        };
+      }
+    } catch {
+      // fetch unavailable or already non-writable — skip
+    }
+  })();
+
+} // end safe-domain guard

@@ -1873,12 +1873,154 @@ function deobfuscateUrlForKeywords(urlStr) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// SECTION 5c — LIGHTWEIGHT ML HEURISTIC SCORING
+// ═══════════════════════════════════════════════════════════════════
+//
+// A logistic-regression-style heuristic model that runs on the structured
+// result object produced by analyzeUrl().  Operates purely on the 6-dimensional
+// feature vector below — no external libraries or network calls required.
+//
+// Integration path:
+//   analyzeUrl() → buildResult() → enrichWithML() → result.mlRiskScore
+//   background.js computeRiskSteps() adds mlRaw as a 5th weighted component.
+//
+// Design decisions:
+//   • Weights are hand-calibrated against the existing signal set, not trained.
+//     They approximate a logistic model’s coefficient magnitudes.
+//   • numSignals gets a diminishing-returns cap (max 5) so a flood of weak
+//     signals cannot dominate the score.
+//   • trustScore contribution is inverted (100 − trust) so high-trust domains
+//     contribute near-zero ML risk.
+//   • domainAgeRisk is an optional field; defaults to 0 when absent so
+//     the model degrades gracefully for safe/trusted exits.
+
+/**
+ * FEATURE WEIGHTS for mlScore()
+ * Calibrated to produce scores in the 0–100 range:
+ *   - Single clipboard event alone → ~20 (below suspicious threshold)
+ *   - Phishing form + domain risk  → ~60+ (suspicious → malicious band)
+ *   - Full signal cluster           → capped at 100
+ */
+const ML_WEIGHTS = {
+  numSignals:    8,    // per signal, capped at 5 signals (max contribution: 40)
+  hasClipboard: 20,    // clipboard_hijack present
+  hasPhishing:  40,    // phishing_form present (highest-weight behavioural signal)
+  hasIframe:    15,    // hidden_iframe present
+  hasMalware:   35,    // malware_signature / keylogger_detected
+  trustPenalty:  0.3,  // per (100 - trustScore) point
+  domainAgeRisk: 10,   // per unit of domain age risk (0–1 scale expected)
+};
+
+/**
+ * Extracts a 6-dimensional feature vector from a detection result.
+ *
+ * Features are normalised to binary (0/1) or clamped numeric ranges so
+ * they can be multiplied directly by ML_WEIGHTS without scaling.
+ *
+ * @param {object} result — output of analyzeUrl() / buildResult()
+ * @returns {object} feature vector
+ */
+function extractFeatures(result) {
+  const signals = Array.isArray(result.signals) ? result.signals : [];
+
+  return {
+    // Discrete signal count, capped at 5 to apply diminishing returns
+    numSignals:    Math.min(signals.length, 5),
+
+    // Binary presence flags for high-weight signals
+    hasClipboard:  signals.includes("clipboard_hijack")   ? 1 : 0,
+    hasPhishing:   signals.includes("phishing_form")      ? 1 : 0,
+    hasIframe:     signals.includes("hidden_iframe")      ? 1 : 0,
+    hasMalware:    (signals.includes("malware_signature") ||
+                   signals.includes("keylogger_detected")) ? 1 : 0,
+
+    // Numeric: high trust → low penalty (range 0–100, inverted in mlScore)
+    trustScore:    typeof result.trustScore === "number"
+                     ? Math.max(0, Math.min(100, result.trustScore))
+                     : 50,   // default: neutral trust
+
+    // Optional field set by domain-age heuristic (0 = new/unknown, 1 = old/safe)
+    // Inverted below: higher value → lower risk contribution
+    domainAgeRisk: typeof result.domainAgeRisk === "number"
+                     ? Math.max(0, Math.min(1, result.domainAgeRisk))
+                     : (result.signalFlags?.domainAgeHeuristicNew ? 0.7 : 0),
+  };
+}
+
+/**
+ * Computes an ML-style composite risk score from a feature vector.
+ *
+ * Formula (logistic-style linear combination, capped at 100):
+ *   score = (Σ feature_i × weight_i) capped to [0, 100]
+ *
+ * @param {object} features — output of extractFeatures()
+ * @returns {number} ML risk score, 0–100
+ */
+function mlScore(features) {
+  let score = 0;
+
+  score += features.numSignals    * ML_WEIGHTS.numSignals;    // 0–40
+  score += features.hasClipboard  * ML_WEIGHTS.hasClipboard;  // 0 or 20
+  score += features.hasPhishing   * ML_WEIGHTS.hasPhishing;   // 0 or 40
+  score += features.hasIframe     * ML_WEIGHTS.hasIframe;     // 0 or 15
+  score += features.hasMalware    * ML_WEIGHTS.hasMalware;    // 0 or 35
+
+  // Trust penalty: low-trust domain boosts score, high-trust domain adds ~0
+  score += (100 - features.trustScore) * ML_WEIGHTS.trustPenalty;
+
+  // Domain age risk: newly-registered / throwaway domains are higher risk
+  score += features.domainAgeRisk * ML_WEIGHTS.domainAgeRisk;
+
+  return Math.min(100, Math.round(score * 10) / 10);   // 1 decimal precision
+}
+
+/**
+ * Enriches a detection result with ML heuristic scoring in-place.
+ *
+ * Called automatically by the wrapped analyzeUrl() in the module export —
+ * callers do NOT need to invoke this directly.
+ *
+ * Adds two fields to result:
+ *   result.mlFeatures   {object}  — the 6-dim feature vector
+ *   result.mlRiskScore  {number}  — ML risk score 0–100
+ *
+ * @param {object} result — mutable result from buildResult()
+ * @returns {object} same result object (mutated)
+ */
+function enrichWithML(result) {
+  try {
+    const features    = extractFeatures(result);
+    const mlRisk      = mlScore(features);
+
+    result.mlFeatures  = features;
+    result.mlRiskScore = mlRisk;
+
+    console.debug("[SentinelEngine-ML] Feature vector:", features, "→ mlRiskScore:", mlRisk);
+  } catch (e) {
+    // Fail-open: ML enrichment error must never break the detection pipeline.
+    result.mlRiskScore = 0;
+    result.mlFeatures  = {};
+    console.warn("[SentinelEngine-ML] enrichWithML error:", e?.message);
+  }
+  return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // SECTION 6 — MODULE EXPORT (compatible with service worker)
 // ═══════════════════════════════════════════════════════════════════
 
 // Use a global object pattern instead of ES module exports —
 // ensures compatibility with the service worker's script loading context
 // (manifest does NOT declare "type": "module", so importScripts() is used)
+//
+// analyzeUrl is wrapped to automatically call enrichWithML() on every result
+// path without modifying the 10+ return points inside analyzeUrl() itself.
 if (typeof globalThis !== "undefined") {
-  globalThis.SentinelDetectionEngine = { analyzeUrl, loadThreatIntel };
+  globalThis.SentinelDetectionEngine = {
+    analyzeUrl: (rawUrl) => enrichWithML(analyzeUrl(rawUrl)),
+    loadThreatIntel,
+    // Expose helpers for unit tests and the adaptive engine
+    extractFeatures,
+    mlScore,
+  };
 }

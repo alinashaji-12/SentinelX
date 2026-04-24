@@ -1,4 +1,4 @@
-﻿/**
+/**
  * background.js — Sentinel Browse Extension v2.0 (MV3 Service Worker)
  *
  * PRODUCTION-GRADE ARCHITECTURE
@@ -990,18 +990,33 @@ function normalizeReasonList(result) {
 }
 
 function computeRiskSteps(result, context) {
-  const baseRaw = typeof result?.score === "number" ? clamp(result.score * 10, 0, 100) : 0;
-  const aiRaw = typeof result?.aiScore === "number"
+  const baseRaw     = typeof result?.score === "number" ? clamp(result.score * 10, 0, 100) : 0;
+  const aiRaw       = typeof result?.aiScore === "number"
     ? clamp(result.aiScore, 0, 100)
     : clamp(result?.confidence || 0, 0, 100);
   const behaviorRaw = clamp(context?.behaviorRisk || 0, 0, 100);
-  const intelRaw = clamp(context?.intel?.confidence || 0, 0, 100);
+  const intelRaw    = clamp(context?.intel?.confidence || 0, 0, 100);
 
-  let weighted = (baseRaw * 0.45) + (aiRaw * 0.30) + (behaviorRaw * 0.20) + (intelRaw * 0.05);
+  // ── ML heuristic component (Section 5c of detectionEngine.js) ──────────
+  // mlRiskScore is injected by enrichWithML() which wraps analyzeUrl().
+  // Defaults to 0 so legacy cached results without the field are unaffected.
+  const mlRaw = clamp(typeof result?.mlRiskScore === "number" ? result.mlRiskScore : 0, 0, 100);
 
-  if (result?.status === "malicious") weighted = Math.max(weighted, 86);
-  if (result?.status === "suspicious") weighted = Math.max(weighted, 52);
-  if (context?.intel?.isMalicious) weighted = Math.max(weighted, 90);
+  // Weighted combination — weights sum to 1.0:
+  //   base 40%  |  AI 25%  |  behavior 20%  |  intel 5%  |  ML 10%
+  // (Previously: base 45%, AI 30%, behavior 20%, intel 5% — ML replaces 10pp
+  //  taken equally from base and AI to preserve relative priority order.)
+  let weighted = (baseRaw * 0.40) + (aiRaw * 0.25) + (behaviorRaw * 0.20) + (intelRaw * 0.05) + (mlRaw * 0.10);
+
+  // Hard floor overrides (status-driven — must stay above threshold)
+  if (result?.status === "malicious")      weighted = Math.max(weighted, 86);
+  if (result?.status === "suspicious")     weighted = Math.max(weighted, 52);
+  if (context?.intel?.isMalicious)         weighted = Math.max(weighted, 90);
+
+  // Combine with mlRaw directly: final score is the max of the weighted
+  // composite and the raw ML score so the ML model can never be down-voted
+  // by a low AI/behavioral reading when it is highly confident.
+  weighted = Math.max(weighted, mlRaw * 0.85);  // ML ceiling: 85% influence max
 
   const finalRiskScore = Math.round(clamp(weighted, 0, 100));
   const riskSteps = [
@@ -1009,10 +1024,11 @@ function computeRiskSteps(result, context) {
     `AI model: ${Math.round(aiRaw)}/100`,
     `Behavioral telemetry: ${Math.round(behaviorRaw)}/100`,
     `Threat intel confidence: ${Math.round(intelRaw)}/100`,
+    `ML heuristic score: ${Math.round(mlRaw)}/100`,
     `Final risk score: ${finalRiskScore}/100`,
   ];
 
-  return { finalRiskScore, baseRaw, aiRaw, behaviorRaw, intelRaw, riskSteps };
+  return { finalRiskScore, baseRaw, aiRaw, behaviorRaw, intelRaw, mlRaw, riskSteps };
 }
 
 async function getThreatIntelContext(hostname) {
