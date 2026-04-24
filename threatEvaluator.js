@@ -83,6 +83,22 @@ const SIGNAL_WEIGHTS = {
   "ip_address": 0.5,
   "redirectLoop": 1.5,
 
+  // ── SSL / TLS signals (Phase 1) ────────────────────────────────────────
+  // These map directly to certificate issues detected via webRequest API.
+  // Weights are calibrated relative to behavioral signals:
+  //   • insecure_http alone ≈ low risk (many legacy CDNs still use HTTP)
+  //   • invalid/expired cert = strong risk (clear user deception signal)
+  //   • self_signed_cert + any other signal = suspicious at minimum
+  //   • weak_encryption = medium (SHA1/MD5 deprecated but not always attack)
+  //   • mixed_content = low (often third-party ads on otherwise safe pages)
+  "insecure_http":      1.5,   // Plain HTTP navigation (no HTTPS)
+  "invalid_ssl":        3.5,   // Cert validation failed / untrusted CA
+  "expired_cert":       3.0,   // Certificate past validTo date
+  "self_signed_cert":   2.5,   // Issuer == Subject (no trusted CA chain)
+  "domain_mismatch":    3.5,   // SAN/CN does not match the hostname
+  "weak_encryption":    1.5,   // SHA-1, MD5, RC4, DES detected
+  "mixed_content":      1.0,   // HTTPS page loads HTTP sub-resources
+
   // Default weight for unknown signals
   "default": 1.0,
 };

@@ -1907,6 +1907,8 @@ const ML_WEIGHTS = {
   hasPhishing:  40,    // phishing_form present (highest-weight behavioural signal)
   hasIframe:    15,    // hidden_iframe present
   hasMalware:   35,    // malware_signature / keylogger_detected
+  hasSSLIssue:  30,    // invalid_ssl / expired_cert / domain_mismatch / self_signed_cert
+  hasInsecureHTTP: 12, // plain HTTP navigation (lower weight — many legacy CDNs)
   trustPenalty:  0.3,  // per (100 - trustScore) point
   domainAgeRisk: 10,   // per unit of domain age risk (0–1 scale expected)
 };
@@ -1923,6 +1925,11 @@ const ML_WEIGHTS = {
 function extractFeatures(result) {
   const signals = Array.isArray(result.signals) ? result.signals : [];
 
+  // SSL signals: any certificate-level problem that indicates active deception
+  const SSL_CERT_SIGNALS = [
+    "invalid_ssl", "expired_cert", "self_signed_cert", "domain_mismatch",
+  ];
+
   return {
     // Discrete signal count, capped at 5 to apply diminishing returns
     numSignals:    Math.min(signals.length, 5),
@@ -1933,6 +1940,10 @@ function extractFeatures(result) {
     hasIframe:     signals.includes("hidden_iframe")      ? 1 : 0,
     hasMalware:    (signals.includes("malware_signature") ||
                    signals.includes("keylogger_detected")) ? 1 : 0,
+
+    // SSL/TLS certificate flags
+    hasSSLIssue:     SSL_CERT_SIGNALS.some(s => signals.includes(s)) ? 1 : 0,
+    hasInsecureHTTP: signals.includes("insecure_http") ? 1 : 0,
 
     // Numeric: high trust → low penalty (range 0–100, inverted in mlScore)
     trustScore:    typeof result.trustScore === "number"
@@ -1964,6 +1975,10 @@ function mlScore(features) {
   score += features.hasPhishing   * ML_WEIGHTS.hasPhishing;   // 0 or 40
   score += features.hasIframe     * ML_WEIGHTS.hasIframe;     // 0 or 15
   score += features.hasMalware    * ML_WEIGHTS.hasMalware;    // 0 or 35
+
+  // SSL/TLS certificate signals
+  score += features.hasSSLIssue    * ML_WEIGHTS.hasSSLIssue;    // 0 or 30
+  score += features.hasInsecureHTTP * ML_WEIGHTS.hasInsecureHTTP; // 0 or 12
 
   // Trust penalty: low-trust domain boosts score, high-trust domain adds ~0
   score += (100 - features.trustScore) * ML_WEIGHTS.trustPenalty;

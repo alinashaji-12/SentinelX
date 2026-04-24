@@ -1,39 +1,39 @@
-/**
- * background.js — Sentinel Browse Extension v2.0 (MV3 Service Worker)
+﻿/**
+ * background.js â€” Sentinel Browse Extension v2.0 (MV3 Service Worker)
  *
  * PRODUCTION-GRADE ARCHITECTURE
- * ══════════════════════════════════════════════════════════════════════
+ * â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
  *
  * CRITICAL MV3 CONSTRAINTS THIS FILE HANDLES:
- *   • Service workers restart after ~30s of inactivity — any in-memory
+ *   â€¢ Service workers restart after ~30s of inactivity â€” any in-memory
  *     state (Maps, Sets, variables) is DESTROYED. Bypass must use storage.
- *   • webNavigation.onBeforeNavigate fires for redirects and history
- *     navigation — deduplication prevents re-analysis of the same tab.
- *   • chrome.tabs.update is async — the navigation may complete before
+ *   â€¢ webNavigation.onBeforeNavigate fires for redirects and history
+ *     navigation â€” deduplication prevents re-analysis of the same tab.
+ *   â€¢ chrome.tabs.update is async â€” the navigation may complete before
  *     the callback fires. We use immediate redirect to warning.html to
  *     preempt the navigation as early as possible.
- *   • importScripts() is the only safe module loading mechanism in a
+ *   â€¢ importScripts() is the only safe module loading mechanism in a
  *     non-module service worker. No ES `import` syntax.
  *
  * EXECUTION ORDER (per navigation event):
  *   1. frameId === 0 guard (main frame only)
  *   2. Scheme guard (http/https only)
- *   3. Dedup guard (pendingAnalysis Set — same tab, 2s window)
+ *   3. Dedup guard (pendingAnalysis Set â€” same tab, 2s window)
  *   4. Bypass check FIRST (chrome.storage.local, TTL validated)
  *   5. LRU cache check (in-memory, 500 entries, 10-min TTL)
- *   6. Detection engine (analyzeUrl — synchronous, <5ms)
+ *   6. Detection engine (analyzeUrl â€” synchronous, <5ms)
  *   7. Result routing:
- *      MALICIOUS → chrome.tabs.update → warning.html (with all data)
- *      SUSPICIOUS → chrome.tabs.sendMessage → content.js overlay
- *      SAFE      → async history log only
+ *      MALICIOUS â†’ chrome.tabs.update â†’ warning.html (with all data)
+ *      SUSPICIOUS â†’ chrome.tabs.sendMessage â†’ content.js overlay
+ *      SAFE      â†’ async history log only
  *   8. Cache store + history save (non-blocking async)
  */
 
 "use strict";
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 1 — LOAD DETECTION ENGINE
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 1 â€” LOAD DETECTION ENGINE
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 // importScripts is the only valid way to load external scripts in a
 // non-module MV3 service worker.
@@ -66,7 +66,7 @@ try {
 
 async function callAIAnalysis(data) {
   try {
-    console.log("🧠 Calling AI with:", data);
+    console.log("ðŸ§  Calling AI with:", data);
 
     const response = await fetch("http://localhost:3000/analyze", {
       method: "POST",
@@ -77,18 +77,18 @@ async function callAIAnalysis(data) {
     });
 
     const result = await response.json();
-    console.log("🧠 AI Response:", result);
+    console.log("ðŸ§  AI Response:", result);
 
     return result;
   } catch (error) {
-    console.error("❌ AI ERROR:", error);
+    console.error("âŒ AI ERROR:", error);
     return null;
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 2 — CONSTANTS & CONFIGURATION
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 2 â€” CONSTANTS & CONFIGURATION
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 const CONFIG = {
   /** LRU cache: max entries before eviction of oldest. */
@@ -121,9 +121,9 @@ const CONFIG = {
   },
 };
 
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // GLOBAL STATE & DEV MODE
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 let _devModeEnabled = false;
 
@@ -140,9 +140,9 @@ try {
   console.warn("[Sentinel] Failed to sync dev_mode:", e);
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 3 — LRU CACHE (IN-MEMORY, <5ms/operation)
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 3 â€” LRU CACHE (IN-MEMORY, <5ms/operation)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /**
  * Minimal LRU (Least Recently Used) cache for URL analysis results.
@@ -155,7 +155,7 @@ try {
  * Value: { result: object, expires: timestamp }
  *
  * NOTE: This cache is in-memory and is destroyed when the service worker
- * restarts. That is ACCEPTABLE — the cache is only a performance optimization.
+ * restarts. That is ACCEPTABLE â€” the cache is only a performance optimization.
  * Bypass state uses chrome.storage.local for persistence.
  */
 class LRUCache {
@@ -224,12 +224,12 @@ class LRUCache {
   }
 }
 
-// Singleton cache — persists as long as the service worker is alive
+// Singleton cache â€” persists as long as the service worker is alive
 const urlCache = new LRUCache(CONFIG.CACHE_MAX_SIZE, CONFIG.CACHE_TTL_MS);
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 4 — DEDUPLICATION GUARD
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 4 â€” DEDUPLICATION GUARD
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /**
  * Tracks recently-analyzed tabs to prevent duplicate analysis.
@@ -250,7 +250,7 @@ const urlCache = new LRUCache(CONFIG.CACHE_MAX_SIZE, CONFIG.CACHE_TTL_MS);
 const pendingAnalysis = new Map();
 
 // VULN-10: Redirect chain tracker.
-// Tracks {tabId → { originUrl, timestamp }} to detect when a "clean"
+// Tracks {tabId â†’ { originUrl, timestamp }} to detect when a "clean"
 // page immediately redirects to a suspicious destination.
 // Cleared after CONFIG.REDIRECT_CHAIN_TTL_MS (10s).
 const redirectChain = new Map();
@@ -350,13 +350,13 @@ function consumeRedirectOrigin(tabId) {
   return entry.originUrl;
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 5 — STORAGE HELPERS
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 5 â€” STORAGE HELPERS
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /**
  * Promisified chrome.storage.local.get
- * NOTE: Keys MUST be an array — passing a string is documented to work
+ * NOTE: Keys MUST be an array â€” passing a string is documented to work
  * but has inconsistent behavior across Chrome versions.
  *
  * @param {string[]} keys
@@ -400,9 +400,9 @@ function isTrustedDomainHost(hostname) {
   ));
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 5.4 — CLIPBOARD HIJACK CONTEXT VALIDATOR (v3.0)
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 5.4 â€” CLIPBOARD HIJACK CONTEXT VALIDATOR (v3.0)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /**
  * STRICT CLIPBOARD VALIDATION
@@ -427,7 +427,7 @@ function isRealClipboardAttack(signals, trustTier, domain) {
     return { isRealAttack: false, suppression: null };
   }
 
-  // RULE: High-trust domain (Google, university sites, gov) → suppress clipboard_hijack
+  // RULE: High-trust domain (Google, university sites, gov) â†’ suppress clipboard_hijack
   if (trustTier === "high") {
     return {
       isRealAttack: false,
@@ -435,7 +435,7 @@ function isRealClipboardAttack(signals, trustTier, domain) {
     };
   }
 
-  // RULE: Low-trust + clipboard alone → suppress
+  // RULE: Low-trust + clipboard alone â†’ suppress
   const supportingSignals = [
     "phishing_form",
     "hidden_iframe", 
@@ -461,18 +461,18 @@ function isRealClipboardAttack(signals, trustTier, domain) {
   };
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 5.5 — FALSE POSITIVE FILTER (v2.0 Confidence-Based)
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 5.5 â€” FALSE POSITIVE FILTER (v2.0 Confidence-Based)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /**
  * Checks if detected signals warrant an alert based on aggregation rules.
  *
  * Rules:
- *   - Single LOW-confidence signal → suppress
- *   - Single MEDIUM-confidence signal with trusted domain → suppress
- *   - 2+ signals with MEDIUM+ confidence → alert
- *   - 1+ signals with HIGH confidence → alert
+ *   - Single LOW-confidence signal â†’ suppress
+ *   - Single MEDIUM-confidence signal with trusted domain â†’ suppress
+ *   - 2+ signals with MEDIUM+ confidence â†’ alert
+ *   - 1+ signals with HIGH confidence â†’ alert
  *
  * @param {Array} behaviorSignals - Array of { confidence, severity, event }
  * @param {object} domainSignals - Domain-level signal flags
@@ -512,7 +512,7 @@ function checkSignalAggregation(behaviorSignals, domainSignals) {
   if (behaviorSignals.length === 1) {
     const signal = behaviorSignals[0];
 
-    // Single LOW → suppress
+    // Single LOW â†’ suppress
     if (signal.confidence === "LOW") {
       return {
         shouldAlert: false,
@@ -521,7 +521,7 @@ function checkSignalAggregation(behaviorSignals, domainSignals) {
     }
   }
 
-  // Rule 4: Only LOW signals → suppress
+  // Rule 4: Only LOW signals â†’ suppress
   if (lowConfidenceSignals.length > 0 && totalMediumOrHigher === 0) {
     return {
       shouldAlert: false,
@@ -529,16 +529,16 @@ function checkSignalAggregation(behaviorSignals, domainSignals) {
     };
   }
 
-  // Default: no signals → don't alert
+  // Default: no signals â†’ don't alert
   return {
     shouldAlert: false,
     reason: "no_signals"
   };
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 5.6 — ADAPTIVE ALERT GATING (v3.1 — Low-Noise, Future-Proof)
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 5.6 â€” ADAPTIVE ALERT GATING (v3.1 â€” Low-Noise, Future-Proof)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /**
  * Signal weight mapping (v3.1).
@@ -552,19 +552,19 @@ const SIGNAL_WEIGHTS = {
   malware_signature: 1.0,
   threatIntelMatch: 1.0,
   
-  // Medium-high signals (0.6–0.8 weight)
+  // Medium-high signals (0.6â€“0.8 weight)
   phishing_form: 0.75,
   credential_theft: 0.75,
   redirect_loop: 0.75,
   
-  // Medium signals (0.4–0.6 weight)
+  // Medium signals (0.4â€“0.6 weight)
   hidden_iframe: 0.65,
   auto_download: 0.65,
   sensitive_data_entry: 0.6,
   hidden_download_anchor: 0.55,
   obfuscation_detected: 0.5,
   
-  // Low-medium signals (0.3–0.4 weight)
+  // Low-medium signals (0.3â€“0.4 weight)
   clipboard_hijack: 0.4,
   suspicious_regex: 0.35,
   reputationRiskElevated: 0.35,
@@ -644,9 +644,9 @@ function hasCorrelation(signals) {
  * Determines if an alert should be triggered based on risk scoring rules.
  * 
  * Alert rules (v3.1):
- *   1. High risk (≥70) → always alert
- *   2. Medium risk (≥40) + strong signals (≥2) + high confidence (≥0.7) → alert
- *   3. Otherwise → don't alert
+ *   1. High risk (â‰¥70) â†’ always alert
+ *   2. Medium risk (â‰¥40) + strong signals (â‰¥2) + high confidence (â‰¥0.7) â†’ alert
+ *   3. Otherwise â†’ don't alert
  * 
  * @param {object} result - Detection result with risk, signals, confidence
  * @returns {boolean}
@@ -668,8 +668,8 @@ function shouldTriggerAlert(result) {
 /**
  * Checks if a domain has sufficient trust to suppress medium-risk alerts.
  * Trust-aware suppression rules:
- *   - High trust + risk < 60 → suppress alert
- *   - Low trust → never suppress (alert normally)
+ *   - High trust + risk < 60 â†’ suppress alert
+ *   - Low trust â†’ never suppress (alert normally)
  * 
  * @param {object} result - Detection result
  * @returns {boolean} true if alert should be suppressed due to trust
@@ -708,7 +708,7 @@ function isCooldownActive() {
  * MASTER ALERT DECISION FUNCTION (v3.1)
  * 
  * Combines all adaptive gating rules:
- *   1. Cooldown check → suppress if too recent
+ *   1. Cooldown check â†’ suppress if too recent
  *   2. Trigger evaluation (risk + signals + confidence)
  *   3. Trust-aware suppression check
  *   4. Correlation requirement (no isolated low-weight signals)
@@ -722,32 +722,32 @@ function shouldShowAlert(result) {
   
   // Rule 1: Cooldown check
   if (isCooldownActive()) {
-    console.log("[Sentinel-AdaptiveGating] ⏱ Alert suppressed: cooldown active");
+    console.log("[Sentinel-AdaptiveGating] â± Alert suppressed: cooldown active");
     return false;
   }
   
   // Rule 2: Trigger evaluation
   const shouldTrigger = shouldTriggerAlert(result);
   if (!shouldTrigger) {
-    console.log("[Sentinel-AdaptiveGating] 📊 Alert not triggered: insufficient risk/signals");
+    console.log("[Sentinel-AdaptiveGating] ðŸ“Š Alert not triggered: insufficient risk/signals");
     return false;
   }
   
   // Rule 3: Trust-aware suppression
   if (isTrustAwareSuppressed(result)) {
-    console.log("[Sentinel-AdaptiveGating] 🏆 Alert suppressed: high trust domain");
+    console.log("[Sentinel-AdaptiveGating] ðŸ† Alert suppressed: high trust domain");
     return false;
   }
   
   // Rule 4: Correlation requirement
   if (!hasCorrelation(result.signals)) {
-    console.log("[Sentinel-AdaptiveGating] 🔗 Alert suppressed: isolated signal (low correlation)");
+    console.log("[Sentinel-AdaptiveGating] ðŸ”— Alert suppressed: isolated signal (low correlation)");
     return false;
   }
   
-  // Rule 5: All checks passed → show alert and record time
+  // Rule 5: All checks passed â†’ show alert and record time
   ALERT_COOLDOWN.lastAlertTime = Date.now();
-  console.log("[Sentinel-AdaptiveGating] ✅ Alert APPROVED");
+  console.log("[Sentinel-AdaptiveGating] âœ… Alert APPROVED");
   return true;
 }
 
@@ -793,7 +793,7 @@ function checkFalsePositiveFilter(result, normalizedUrl) {
                     hostname.endsWith(rootDomain) && TRUSTED_DOMAINS.has(rootDomain);
 
   if (!isTrusted) {
-    // Unknown domain — don't suppress
+    // Unknown domain â€” don't suppress
     return { shouldSuppress: false, reason: "untrusted domain" };
   }
 
@@ -811,7 +811,7 @@ function checkFalsePositiveFilter(result, normalizedUrl) {
   }
 
   if (hasHighConfidenceSignal) {
-    // High-confidence signal found — don't suppress
+    // High-confidence signal found â€” don't suppress
     return { shouldSuppress: false, reason: "high-confidence signal detected" };
   }
 
@@ -822,9 +822,9 @@ function checkFalsePositiveFilter(result, normalizedUrl) {
   };
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 6 — BYPASS SYSTEM (STORAGE-PERSISTENT)
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 6 â€” BYPASS SYSTEM (STORAGE-PERSISTENT)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /**
  * Normalizes a URL to a bypass key.
@@ -835,8 +835,8 @@ function checkFalsePositiveFilter(result, normalizedUrl) {
  */
 // VULN-04 FIX: toBypassKey() previously skipped multi-pass decode,
 // causing key mismatches with normalizeCacheKey() for double-encoded URLs.
-// e.g. toBypassKey("https://pay%2570al.com/") → "paypal.com" (via URL constructor)
-//      normalizeCacheKey same input → "paypal.com" (via decode first)
+// e.g. toBypassKey("https://pay%2570al.com/") â†’ "paypal.com" (via URL constructor)
+//      normalizeCacheKey same input â†’ "paypal.com" (via decode first)
 // For standard encoding these matched, but for double-encoding they diverged.
 // Now BOTH functions perform the same 4-pass decode before URL construction.
 function toBypassKey(url) {
@@ -865,7 +865,7 @@ function toBypassKey(url) {
 
 /**
  * Checks if a URL has an active (non-expired) bypass.
- * Reads from chrome.storage.local — survives service worker restarts.
+ * Reads from chrome.storage.local â€” survives service worker restarts.
  *
  * @param {string} url
  * @returns {Promise<boolean>}
@@ -881,7 +881,7 @@ async function isBypassed(url) {
 
     if (!entry) return false;
     if (Date.now() > entry.expiresAt) {
-      // Expired — clean up
+      // Expired â€” clean up
       delete bypasses[key];
       await storageSet({ [CONFIG.KEYS.BYPASSES]: bypasses });
       return false;
@@ -931,9 +931,9 @@ async function registerBypass(url) {
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 7 — URL NORMALIZATION (matches detectionEngine.js)
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 7 â€” URL NORMALIZATION (matches detectionEngine.js)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /**
  * Normalizes a URL for use as a cache/bypass key.
@@ -997,18 +997,18 @@ function computeRiskSteps(result, context) {
   const behaviorRaw = clamp(context?.behaviorRisk || 0, 0, 100);
   const intelRaw    = clamp(context?.intel?.confidence || 0, 0, 100);
 
-  // ── ML heuristic component (Section 5c of detectionEngine.js) ──────────
+  // â”€â”€ ML heuristic component (Section 5c of detectionEngine.js) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // mlRiskScore is injected by enrichWithML() which wraps analyzeUrl().
   // Defaults to 0 so legacy cached results without the field are unaffected.
   const mlRaw = clamp(typeof result?.mlRiskScore === "number" ? result.mlRiskScore : 0, 0, 100);
 
-  // Weighted combination — weights sum to 1.0:
+  // Weighted combination â€” weights sum to 1.0:
   //   base 40%  |  AI 25%  |  behavior 20%  |  intel 5%  |  ML 10%
-  // (Previously: base 45%, AI 30%, behavior 20%, intel 5% — ML replaces 10pp
+  // (Previously: base 45%, AI 30%, behavior 20%, intel 5% â€” ML replaces 10pp
   //  taken equally from base and AI to preserve relative priority order.)
   let weighted = (baseRaw * 0.40) + (aiRaw * 0.25) + (behaviorRaw * 0.20) + (intelRaw * 0.05) + (mlRaw * 0.10);
 
-  // Hard floor overrides (status-driven — must stay above threshold)
+  // Hard floor overrides (status-driven â€” must stay above threshold)
   if (result?.status === "malicious")      weighted = Math.max(weighted, 86);
   if (result?.status === "suspicious")     weighted = Math.max(weighted, 52);
   if (context?.intel?.isMalicious)         weighted = Math.max(weighted, 90);
@@ -1150,13 +1150,13 @@ async function applyAdvancedScoring(result, normalizedUrl, tabId) {
   return out;
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 8 — HISTORY & ANALYTICS
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 8 â€” HISTORY & ANALYTICS
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /**
  * Saves a detection result to the threat history log.
- * This is fire-and-forget — we do NOT await it in the navigation handler.
+ * This is fire-and-forget â€” we do NOT await it in the navigation handler.
  *
  * @param {string} url
  * @param {object} result
@@ -1203,9 +1203,9 @@ async function saveThreatHistory(url, result) {
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 9 — BLOCKING LOGIC
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 9 â€” BLOCKING LOGIC
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /**
  * Redirects a tab to the warning page with all detection data encoded
@@ -1214,7 +1214,7 @@ async function saveThreatHistory(url, result) {
  * Data strategy:
  *   Primary:  URL query parameters (instant, no storage read required)
  *   Fallback: chrome.storage.local[LAST_ANALYSIS] (warning.js reads this
- *             if URL params are missing — e.g. DNR-triggered redirects)
+ *             if URL params are missing â€” e.g. DNR-triggered redirects)
  *
  * URL length management:
  *   We limit individual params to 400 chars to stay well under the 2KB
@@ -1268,7 +1268,7 @@ function redirectToWarningPage(tabId, blockedUrl, result) {
     `source=sw`,
   ];
 
-  // Adaptive metadata — present only when adaptive engine has run.
+  // Adaptive metadata â€” present only when adaptive engine has run.
   // Allows warning.js to display reputation/behavior context without
   // an extra storage round-trip.
   if (result.finalScore !== undefined) {
@@ -1299,17 +1299,218 @@ function redirectToWarningPage(tabId, blockedUrl, result) {
     if (chrome.runtime.lastError) {
       console.error("[Sentinel] Tab update failed:", chrome.runtime.lastError.message);
     } else {
-      console.log("[Sentinel] ⛔ Warning page shown for:", blockedUrl);
+      console.log("[Sentinel] â›” Warning page shown for:", blockedUrl);
     }
   });
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 10 — PRIMARY NAVIGATION LISTENER
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 9b â€” SSL / TLS CERTIFICATE ANALYSIS ENGINE
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+//
+// Detects 7 SSL/TLS threat categories using Chrome's webRequest API:
+//   1. insecure_http      â€” plain HTTP navigation (no TLS at all)
+//   2. invalid_ssl        â€” certificate validation failed / untrusted CA
+//   3. expired_cert       â€” validTo timestamp in the past
+//   4. self_signed_cert   â€” issuer == subject (no trusted CA chain)
+//   5. domain_mismatch    â€” SAN/CN does not match the visited hostname
+//   6. weak_encryption    â€” SHA-1, MD5, RC4, or DES cipher detected
+//   7. mixed_content      â€” HTTPS page loads plain HTTP sub-resources
+//
+// Architecture:
+//   â€¢ onHeadersReceived captures securityDetails per main-frame URL.
+//   â€¢ onBeforeRequest tracks HTTP sub-resource requests on HTTPS pages.
+//   â€¢ Both caches keyed by normalized URL / tabId.
+//   â€¢ consumeSSLSignals(url, tabId) drains both and returns typed signals.
+//   â€¢ Signals are merged into result.signals at Step 5.5 of the analysis
+//     flow (onBeforeNavigate), before adaptive scoring and ML enrichment.
+//
+// False-positive guards:
+//   â€¢ localhost / 127.0.0.1 excluded from HTTP-only check.
+//   â€¢ securityDetails only trusted when it is a non-null object.
+//   â€¢ Weak cipher detection uses explicit deprecated algorithm strings.
+
+/** Per-URL SSL metadata cache populated by webRequest.onHeadersReceived. */
+const _SSL_CACHE = new Map();
+
+/** Per-tab HTTP sub-resource tracker for mixed-content detection. */
+const _MIXED_CONTENT_CACHE = new Map();
+
+/** Hostnames excluded from the plain-HTTP signal. */
+const _SSL_SAFE_HTTP_DOMAINS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+/** Deprecated cipher / protocol substrings that indicate weak encryption. */
+const _WEAK_CIPHER_PATTERNS = [
+  "SHA1", "SHA-1", "MD5", "RC4", "DES", "EXPORT", "NULL",
+  "TLS 1.0", "TLS 1.1",
+];
 
 /**
- * Main detection handler — fires on every navigation start.
+ * Converts raw webRequest securityDetails + URL into Sentinel signal strings.
+ *
+ * @param {string}      url        - request URL being analyzed
+ * @param {object|null} secDetails - chrome.webRequest securityDetails object
+ * @param {number}      tabId      - tab making the request
+ * @returns {string[]} Array of signal strings (may be empty)
+ */
+function analyzeSSL(url, secDetails, tabId) {
+  const signals = [];
+
+  // 1. HTTP (no TLS) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  const isHTTPS = url.startsWith("https://");
+  if (!isHTTPS) {
+    let hostname = "";
+    try { hostname = new URL(url).hostname; } catch {}
+    if (!_SSL_SAFE_HTTP_DOMAINS.has(hostname)) {
+      signals.push("insecure_http");
+    }
+    return signals;   // HTTP pages cannot have cert signals
+  }
+
+  // 2â€“7. Certificate-level checks require securityDetails â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  if (!secDetails || typeof secDetails !== "object") {
+    return signals;   // absence of data â‰  presence of problem
+  }
+
+  // 2. Invalid / untrusted certificate
+  if (secDetails.certificateId === 0) {
+    signals.push("invalid_ssl");
+  }
+
+  // 3. Expired certificate
+  const validTo = typeof secDetails.validTo === "number" ? secDetails.validTo : null;
+  if (validTo !== null && validTo < Date.now() / 1000) {
+    signals.push("expired_cert");
+  }
+
+  // 4. Self-signed certificate (issuer == subject, no trusted CA chain)
+  const issuer  = String(secDetails.issuer      || "").trim().toLowerCase();
+  const subject = String(secDetails.subjectName || "").trim().toLowerCase();
+  if (issuer && subject && issuer === subject) {
+    signals.push("self_signed_cert");
+  }
+
+  // 5. Domain mismatch (SAN / CN does not match request hostname)
+  try {
+    const requestHost = new URL(url).hostname.toLowerCase();
+    const sanList = Array.isArray(secDetails.sanList) ? secDetails.sanList : [];
+    const commonName = String(secDetails.subjectName || "").toLowerCase();
+
+    const matchesSAN = sanList.some(san => {
+      const s = String(san).toLowerCase();
+      if (s === requestHost) return true;
+      if (s.startsWith("*.")) {
+        const base = s.slice(2);
+        return requestHost.endsWith("." + base) || requestHost === base;
+      }
+      return false;
+    });
+    const matchesCN = commonName && (
+      commonName === requestHost ||
+      (commonName.startsWith("*.") && requestHost.endsWith("." + commonName.slice(2)))
+    );
+
+    if (!matchesSAN && !matchesCN && (sanList.length > 0 || commonName)) {
+      signals.push("domain_mismatch");
+    }
+  } catch {}
+
+  // 6. Weak encryption (deprecated cipher / protocol)
+  const cryptoStr = [
+    secDetails.cipher || "",
+    secDetails.keyExchangeGroup || "",
+    secDetails.protocol || "",
+  ].join(" ");
+
+  if (_WEAK_CIPHER_PATTERNS.some(p => cryptoStr.includes(p))) {
+    signals.push("weak_encryption");
+  }
+
+  // 7. Mixed content (checked via _MIXED_CONTENT_CACHE, populated separately)
+  if (tabId !== undefined && _MIXED_CONTENT_CACHE.has(tabId)) {
+    const httpResources = _MIXED_CONTENT_CACHE.get(tabId);
+    if (httpResources && httpResources.size > 0) {
+      signals.push("mixed_content");
+    }
+  }
+
+  if (signals.length > 0) {
+    console.log("[Sentinel-SSL]", {
+      url: url.slice(0, 80),
+      signals,
+      protocol: secDetails.protocol || "?",
+      cipher:   (secDetails.cipher  || "?").slice(0, 40),
+    });
+  }
+
+  return signals;
+}
+
+/**
+ * Drains and returns any SSL signals cached for this URL+tab.
+ * Consumes the cache entry (deletes it) so signals inject exactly once.
+ *
+ * @param {string} url   - normalized URL key
+ * @param {number} tabId - tab ID for mixed-content lookup
+ * @returns {string[]}
+ */
+function consumeSSLSignals(url, tabId) {
+  const cached = _SSL_CACHE.get(url);
+  _SSL_CACHE.delete(url);
+  const fromCache = cached ? cached.signals : analyzeSSL(url, null, tabId);
+  return Array.isArray(fromCache) ? fromCache : [];
+}
+
+// webRequest.onHeadersReceived â€” capture securityDetails per main-frame URL
+// Fires after the TLS handshake is complete and response headers arrive.
+chrome.webRequest.onHeadersReceived.addListener(
+  (details) => {
+    if (details.frameId !== 0) return;
+    if (!details.url.startsWith("https://")) return;
+
+    const secDetails  = details.securityDetails || null;
+    const sslSignals  = analyzeSSL(details.url, secDetails, details.tabId);
+
+    if (sslSignals.length > 0) {
+      _SSL_CACHE.set(details.url, { signals: sslSignals, details: secDetails });
+    }
+
+    // Clear mixed-content log for this tab when a new HTTPS main page loads
+    _MIXED_CONTENT_CACHE.delete(details.tabId);
+  },
+  { urls: ["<all_urls>"], types: ["main_frame"] },
+  ["responseHeaders"]
+);
+
+// webRequest.onBeforeRequest â€” detect mixed content (HTTP sub-resources on HTTPS pages)
+// Purely observational â€” does NOT use blocking mode.
+chrome.webRequest.onBeforeRequest.addListener(
+  (details) => {
+    if (details.type === "main_frame") return;
+    if (!details.url.startsWith("http://")) return;
+    const tabId = details.tabId;
+    if (tabId < 0) return;
+
+    if (!_MIXED_CONTENT_CACHE.has(tabId)) {
+      _MIXED_CONTENT_CACHE.set(tabId, new Set());
+    }
+    _MIXED_CONTENT_CACHE.get(tabId).add(details.url.slice(0, 120));
+  },
+  { urls: ["http://*/*"] }
+);
+
+// Housekeeping: clear mixed-content cache on tab close
+chrome.tabs.onRemoved.addListener((tabId) => {
+  _MIXED_CONTENT_CACHE.delete(tabId);
+});
+
+// SECTION 10 â€” PRIMARY NAVIGATION LISTENER
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+/**
+ * Main detection handler â€” fires on every navigation start.
  *
  * CRITICAL ORDERING:
  *   Due to MV3 service worker lifecycle constraints, we cannot use a
@@ -1323,7 +1524,7 @@ function redirectToWarningPage(tabId, blockedUrl, result) {
  *   domains synchronously BEFORE this handler runs, covering the race.
  */
 chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
-  // ── Guard 1: Main frame only ──────────────────────────────────────────
+  // â”€â”€ Guard 1: Main frame only â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (details.frameId !== 0) return;
 
   const rawUrl = details.url;
@@ -1332,19 +1533,19 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   // Reset per-tab behavior risk score on every new top-level navigation
   TAB_BEHAVIOR_RISK.delete(tabId);
 
-  // ── Guard 2: Only analyze http/https ─────────────────────────────────
+  // â”€â”€ Guard 2: Only analyze http/https â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (!/^https?:\/\//i.test(rawUrl)) return;
 
-  // ── Guard 3: Skip our own warning page navigations ───────────────────
+  // â”€â”€ Guard 3: Skip our own warning page navigations â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const extensionOrigin = chrome.runtime.getURL("");
   if (rawUrl.startsWith(extensionOrigin)) return;
 
-  // ── Step 1: Normalize URL ─────────────────────────────────────────────
+  // â”€â”€ Step 1: Normalize URL â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const normalizedUrl = normalizeCacheKey(rawUrl);
 
-  // ── Step 2: Deduplication ─────────────────────────────────────────────
+  // â”€â”€ Step 2: Deduplication â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (isDuplicate(tabId, normalizedUrl)) {
-    console.log("[Sentinel] ⏭ Dedup skip:", normalizedUrl);
+    console.log("[Sentinel] â­ Dedup skip:", normalizedUrl);
     return;
   }
 
@@ -1358,30 +1559,30 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     TAB_BEHAVIOR_RISK.set(tabId, Math.min(100, prevRisk + 15));
   }
 
-  console.log("[Sentinel] ▶ Analyzing:", normalizedUrl);
+  console.log("[Sentinel] â–¶ Analyzing:", normalizedUrl);
 
-  // 🧠 DEBUG: Log analysis start
+  // ðŸ§  DEBUG: Log analysis start
   const analysisStartTime = Date.now();
 
-  // ── Step 3: Bypass check (FIRST — before any blocking logic) ─────────
+  // â”€â”€ Step 3: Bypass check (FIRST â€” before any blocking logic) â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const bypassed = await isBypassed(normalizedUrl);
   if (bypassed) {
-    console.log("[Sentinel] ✅ Bypassed (user-approved):", normalizedUrl);
+    console.log("[Sentinel] âœ… Bypassed (user-approved):", normalizedUrl);
     return;
   }
 
-  // ── Step 4: LRU Cache check ───────────────────────────────────────────
+  // â”€â”€ Step 4: LRU Cache check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const cached = urlCache.get(normalizedUrl);
   if (cached) {
-    console.log("[Sentinel] ⚡ Cache hit:", normalizedUrl, "→", cached.status);
-    // Still act on cached malicious result — user may be revisiting a bad URL
+    console.log("[Sentinel] âš¡ Cache hit:", normalizedUrl, "â†’", cached.status);
+    // Still act on cached malicious result â€” user may be revisiting a bad URL
     if (cached.status === "malicious") {
       redirectToWarningPage(tabId, rawUrl, cached);
     }
     return;
   }
 
-  // ── Step 5: Detection engine ──────────────────────────────────────────
+  // â”€â”€ Step 5: Detection engine â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   let result;
   try {
     const engine = globalThis.SentinelDetectionEngine;
@@ -1391,7 +1592,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     }
     result = engine.analyzeUrl(normalizedUrl);
 
-    // 🧠 AI LAYER
+    // ðŸ§  AI LAYER
     const aiResult = await callAIAnalysis({
       url: normalizedUrl,
       signals: result.signals || [],
@@ -1416,7 +1617,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     return; // Fail-open
   }
 
-  console.log("[Sentinel] 📊 Base Result:", {
+  console.log("[Sentinel] ðŸ“Š Base Result:", {
     status: result.status,
     score: result.score,
     confidence: result.confidence,
@@ -1424,7 +1625,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     appliedRule: result.appliedRule,
   });
 
-  // 🧠 DEBUG: Log detailed signals and confidence levels
+  // ðŸ§  DEBUG: Log detailed signals and confidence levels
   if (Array.isArray(result.behaviorSignals) && result.behaviorSignals.length > 0) {
     console.log("[Sentinel-AI] BEHAVIOR SIGNALS:", result.behaviorSignals.map(s => ({
       event: s.event,
@@ -1434,11 +1635,53 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     })));
   }
 
+  // â”€â”€ Step 5.5: Inject SSL/TLS signals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // consumeSSLSignals() drains the webRequest.onHeadersReceived cache for
+  // this URL. For HTTP pages it calls analyzeSSL() directly.
+  // Signals are de-duplicated and merged before adaptive scoring so the ML
+  // model and threat evaluator both see the full signal set.
+  try {
+    const sslSignals = consumeSSLSignals(normalizedUrl, tabId);
+    if (sslSignals.length > 0) {
+      result.signals = [...new Set([...(result.signals || []), ...sslSignals])];
 
-  // ── Step 6: Cache the BASE result (fast path for repeated visits) ──────
+      // Build human-readable reasons for SSL issues (shown in overlay)
+      const SSL_REASON_MAP = {
+        insecure_http:    "Page loaded over plain HTTP â€” no encryption",
+        invalid_ssl:      "SSL certificate could not be validated",
+        expired_cert:     "SSL certificate has expired",
+        self_signed_cert: "SSL certificate is self-signed (no trusted CA)",
+        domain_mismatch:  "SSL certificate domain does not match the site",
+        weak_encryption:  "Site uses deprecated/weak encryption (SHA-1/TLS 1.0)",
+        mixed_content:    "Page loads insecure HTTP sub-resources (mixed content)",
+      };
+      const sslReasons = sslSignals
+        .map(s => SSL_REASON_MAP[s] || s)
+        .filter(Boolean);
+
+      result.reasons = [...new Set([...(result.reasons || []), ...sslReasons])].slice(0, 6);
+
+      // Upgrade status if critical SSL signal present
+      const CRITICAL_SSL = ["invalid_ssl", "expired_cert", "domain_mismatch"];
+      const hasCriticalSSL = sslSignals.some(s => CRITICAL_SSL.includes(s));
+      if (hasCriticalSSL && result.status === "safe") {
+        result.status = "suspicious";
+        console.log("[Sentinel-SSL] Status upgraded to suspicious due to:", sslSignals);
+      }
+
+      console.log("[Sentinel AI] SSL signals merged:", sslSignals);
+    }
+  } catch (sslErr) {
+    // Fail-open: SSL analysis never blocks the detection flow
+    console.warn("[Sentinel-SSL] analyzeSSL error:", sslErr?.message);
+  }
+
+
+
+  // â”€â”€ Step 6: Cache the BASE result (fast path for repeated visits) â”€â”€â”€â”€â”€â”€
   urlCache.set(normalizedUrl, result);
 
-  // ── Step 7: Adaptive scoring layer (v3.0) ───────────────────────────────
+  // â”€â”€ Step 7: Adaptive scoring layer (v3.0) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Reads sentinel_reputation + sentinel_user_profile from storage.
   // Adjusts score via reputation weight + behavior adjustment.
   // Applies dynamic thresholds based on user sensitivity level.
@@ -1451,12 +1694,12 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     try {
       result = await adaptiveEngine.applyAdaptiveScoring(result, hostname);
       if (result.wasAdaptivelyChanged) {
-        console.log("[Sentinel] 🔄 Adaptive verdict:", result.status,
+        console.log("[Sentinel] ðŸ”„ Adaptive verdict:", result.status,
           "| Rule:", result.adaptiveAppliedRule,
           "| finalScore:", result.finalScore);
       }
     } catch (adaptiveErr) {
-      // Fail-open: adaptive layer error → use base result
+      // Fail-open: adaptive layer error â†’ use base result
       console.warn("[Sentinel] Adaptive engine error:", adaptiveErr?.message);
     }
   }
@@ -1468,7 +1711,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     result.reasons = [...new Set([...(result.reasons || []), `Redirect loop pattern detected (${redirectLoop.count} hops)`])].slice(0, 3);
   }
   
-  // ── Step 7c: Apply signal decay to reduce noisy signals ────────────────────
+  // â”€â”€ Step 7c: Apply signal decay to reduce noisy signals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // This adjusts the risk score downward for signals prone to false positives
   // (e.g., clipboard_hijack on high-trust domains, hidden_iframe in ads)
   if (Array.isArray(result.signals) && result.signals.length > 0) {
@@ -1502,14 +1745,14 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   // Refresh cache so downstream overlay path sees enriched context.
   urlCache.set(normalizedUrl, result);
 
-  // ── Step 8: Route based on FINAL verdict ────────────────────────────────
+  // â”€â”€ Step 8: Route based on FINAL verdict â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (result.status === "malicious") {
-    // 🎯 MALICIOUS PATH: Even high-confidence verdicts benefit from gating
+    // ðŸŽ¯ MALICIOUS PATH: Even high-confidence verdicts benefit from gating
     // Malicious detections skip some gating (already high confidence) but
     // still check cooldown to prevent spam on the same/similar URLs
     if (!isCooldownActive()) {
       ALERT_COOLDOWN.lastAlertTime = Date.now();
-      console.log("[Sentinel] 🚫 BLOCKING:", normalizedUrl);
+      console.log("[Sentinel] ðŸš« BLOCKING:", normalizedUrl);
       redirectToWarningPage(tabId, rawUrl, result);
       saveThreatHistory(rawUrl, result).catch(e => console.warn("[Sentinel] History save error:", e));
 
@@ -1519,19 +1762,19 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
         adaptiveEngine.updateUserProfile(hostname, "blocked").catch(() => {});
       }
     } else {
-      console.log("[Sentinel] ⏱ Malicious alert suppressed: cooldown active");
+      console.log("[Sentinel] â± Malicious alert suppressed: cooldown active");
       saveThreatHistory(rawUrl, result).catch(e => console.warn("[Sentinel] History save error:", e));
     }
 
   } else if (result.status === "suspicious") {
-    // ✨ NEW: Apply adaptive alert gating (v3.1)
+    // âœ¨ NEW: Apply adaptive alert gating (v3.1)
     // Combines: risk scoring, signal correlation, trust awareness, cooldown
     const adaptiveDecision = shouldShowAlert(result);
     
     if (!adaptiveDecision) {
-      console.log("[Sentinel] ✅ ADAPTIVE GATING SUPPRESSED:", normalizedUrl);
+      console.log("[Sentinel] âœ… ADAPTIVE GATING SUPPRESSED:", normalizedUrl);
       
-      // 🧠 DEBUG: Log suppression decision with details
+      // ðŸ§  DEBUG: Log suppression decision with details
       console.log("[Sentinel-AdaptiveGating-Suppressed]", {
         url: normalizedUrl,
         status: result.status,
@@ -1548,8 +1791,8 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
       return;
     }
 
-    console.log("[Sentinel] ⚠️ Suspicious (Adaptive Alert Approved):", normalizedUrl);
-    // NOTE: The overlay is delivered by webNavigation.onCompleted below—
+    console.log("[Sentinel] âš ï¸ Suspicious (Adaptive Alert Approved):", normalizedUrl);
+    // NOTE: The overlay is delivered by webNavigation.onCompleted belowâ€”
     // after the page and content script are fully ready at document_idle.
     // Sending here (onBeforeNavigate) arrives before the listener registers
     // and was silently dropped. Dead send removed.
@@ -1562,7 +1805,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     }
 
   } else {
-    // Safe — skip logging for hard-override trusted domains
+    // Safe â€” skip logging for hard-override trusted domains
     if (result.score !== -5) {
       saveThreatHistory(rawUrl, result).catch(e => console.warn("[Sentinel] History save error:", e));
     }
@@ -1570,17 +1813,17 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
 });
 
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 10b — LEGACY REPUTATION (DEPRECATED — v3.0 uses adaptiveEngine)
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 10b â€” LEGACY REPUTATION (DEPRECATED â€” v3.0 uses adaptiveEngine)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // updateDomainReputation() wrote the old v2.1 schema { suspicious, malicious }.
 // v3.0 uses updateDomainReputationV3() from adaptiveEngine.js which writes the
 // correct { suspiciousHits, maliciousHits, bypassCount } schema with time-decay.
 // The old function is intentionally removed to prevent schema conflicts.
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 10c — STATUS OVERLAY (webNavigation.onCompleted)
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 10c â€” STATUS OVERLAY (webNavigation.onCompleted)
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /**
  * Sends sentinel:show-overlay to content.js with automatic retry.
@@ -1594,14 +1837,14 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
  *   onBeforeNavigate fires BEFORE the page loads. document_idle means the
  *   content script is ready AFTER. The message arrives before the listener
  *   is registered and is silently dropped. onCompleted fires after
- *   document_idle — content script is guaranteed to be listening.
+ *   document_idle â€” content script is guaranteed to be listening.
  *
  * @param {number} tabId
- * @param {object} payload  — full message payload for content.js
+ * @param {object} payload  â€” full message payload for content.js
  * @param {number} [retries=3]
  */
 /**
- * Per-tab accumulated behavior risk score (0–100, in-memory only).
+ * Per-tab accumulated behavior risk score (0â€“100, in-memory only).
  * Populated by BEHAVIOR_ALERT messages from behaviorMonitor.js.
  * Reset on each new navigation so scores never bleed across pages.
  */
@@ -1630,18 +1873,18 @@ function sendOverlayWithRetry(tabId, payload, retries = 2) {
 }
 
 /**
- * Overlay delivery hub — fires AFTER the page is fully loaded.
+ * Overlay delivery hub â€” fires AFTER the page is fully loaded.
  *
  * Pipeline:
- *   1. Guard: extension pages / non-http(s) / sub-frames   → skip
- *   2. Cache lookup: onBeforeNavigate already ran analyzeUrl()  → O(1) hit
+ *   1. Guard: extension pages / non-http(s) / sub-frames   â†’ skip
+ *   2. Cache lookup: onBeforeNavigate already ran analyzeUrl()  â†’ O(1) hit
  *   3. Show overlay for analyzed statuses (malicious/suspicious/safe)
- *   4. Suspicious → additionally trigger sentinel:play-alert sound
+ *   4. Suspicious â†’ additionally trigger sentinel:play-alert sound
  *
  * MESSAGE TYPE: "sentinel:show-overlay"
  *   This matches the listener in content.js exactly.
  *   The old "sentinel:suspicious-overlay" type in onBeforeNavigate was the
- *   root cause of the silent failure — nobody was listening for that type.
+ *   root cause of the silent failure â€” nobody was listening for that type.
  */
 chrome.webNavigation.onCompleted.addListener((details) => {
   // Guard 1: main frame only
@@ -1651,7 +1894,7 @@ chrome.webNavigation.onCompleted.addListener((details) => {
   const extensionOrigin = chrome.runtime.getURL("");
   if (details.url.startsWith(extensionOrigin)) return;
 
-  // Guard 3: http/https only — skip chrome://, file://, etc.
+  // Guard 3: http/https only â€” skip chrome://, file://, etc.
   if (!/^https?:\/\//i.test(details.url)) return;
 
   const tabId = details.tabId;
@@ -1674,7 +1917,7 @@ chrome.webNavigation.onCompleted.addListener((details) => {
     tabId
   });
 
-  // ── NEW: Apply centralized threat evaluator ────────────────────────────
+  // â”€â”€ NEW: Apply centralized threat evaluator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // This gates alert decisions through structured evaluation:
   // - Weighted signal correlation
   // - Confidence weighting
@@ -1716,7 +1959,7 @@ chrome.webNavigation.onCompleted.addListener((details) => {
     }
   }
 
-  // ── Step 2: build overlay payload ─────────────────────────────────────
+  // â”€â”€ Step 2: build overlay payload â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const isSafe       = result.status === "safe";
   const isSuspicious = result.status === "suspicious";
   const isMalicious  = result.status === "malicious";
@@ -1726,7 +1969,7 @@ chrome.webNavigation.onCompleted.addListener((details) => {
     ? result.finalRiskScore
     : (typeof result.score === "number" ? Math.round(result.score * 10) : 0);
 
-  // ── [Sentinel AI] Structured overlay decision log ─────────────────────
+  // â”€â”€ [Sentinel AI] Structured overlay decision log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   console.log("[Sentinel AI] Overlay decision", {
     url,
     status:    result.status,
@@ -1738,16 +1981,16 @@ chrome.webNavigation.onCompleted.addListener((details) => {
     evaluator: threatDecision ? { shouldAlert: threatDecision.shouldAlert, severity: threatDecision.severity } : null,
   });
 
-  // ── Risk floor gate: skip overlay for genuinely low-risk pages ─────────
+  // â”€â”€ Risk floor gate: skip overlay for genuinely low-risk pages â”€â”€â”€â”€â”€â”€â”€â”€â”€
   // Malicious always shows (redirected to warning.html above, but defence-in-depth).
   // Suspicious/safe need risk >= 40 to justify IPC cost and user disruption.
   if (!isMalicious && displayRisk < 40) {
-    console.log("[Sentinel AI] Overlay skipped — risk below threshold", displayRisk, "/ 40");
+    console.log("[Sentinel AI] Overlay skipped â€” risk below threshold", displayRisk, "/ 40");
     return;
   }
 
   const overlayMessage = isSafe
-    ? "Site verified — no threats detected"
+    ? "Site verified â€” no threats detected"
     : `Caution: ${result.attackType
         ? result.attackType.replace(/_/g, " ")
         : "suspicious signals detected"}`;
@@ -1786,7 +2029,7 @@ chrome.webNavigation.onCompleted.addListener((details) => {
 
   sendOverlayWithRetry(tabId, payload);
 
-  // ── Step 3: alert sound for suspicious (nice-to-have, non-fatal) ──────
+  // â”€â”€ Step 3: alert sound for suspicious (nice-to-have, non-fatal) â”€â”€â”€â”€â”€â”€
   if (isSuspicious) {
     chrome.tabs.sendMessage(tabId, {
       type:      "sentinel:play-alert",
@@ -1796,10 +2039,10 @@ chrome.webNavigation.onCompleted.addListener((details) => {
 });
 
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 11 — MESSAGE HANDLER
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 11 â€” MESSAGE HANDLER
 
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message.type !== "string") return false;
@@ -1881,7 +2124,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         adaptiveEngRevoke.revokeTrust(revokeHost)
           .then(ok => {
             // Evict any cached result for this domain so next visit re-evaluates
-            // Note: cache key includes full URL, not just hostname — we do a prefix purge
+            // Note: cache key includes full URL, not just hostname â€” we do a prefix purge
             sendResponse({ ok });
           })
           .catch(e => sendResponse({ ok: false, error: e.message }));
@@ -1914,7 +2157,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    // ── Behavioral Detection Signals ─────────────────────────────────────
+    // â”€â”€ Behavioral Detection Signals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Sent by behaviorMonitor.js and content.js when in-page APIs are abused.
     // Risk accumulates per tab; high-risk events immediately trigger overlay.
     case "BEHAVIOR_ALERT": {
@@ -1926,9 +2169,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try { alertHost = new URL(url || sender?.tab?.url || "").hostname.toLowerCase(); } catch {}
       const trustedEventDomain = isTrustedDomainHost(alertHost);
 
-      // ═══════════════════════════════════════════════════════════════════
+      // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
       // CLIPBOARD HIJACK SUPPRESSION (v3.0)
-      // ═══════════════════════════════════════════════════════════════════
+      // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
       let suppressionReason = null;
       let processingEvent = event;
 
@@ -1947,7 +2190,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // If clipboard is the ONLY signal (risk < 20), suppress it for high-trust domains
         if (trustTier === "high" && currentRisk < 20) {
           suppressionReason = "Clipboard access detected but considered benign due to trusted domain";
-          console.log(`[Sentinel] 🛑 Clipboard suppressed: ${suppressionReason}`);
+          console.log(`[Sentinel] ðŸ›‘ Clipboard suppressed: ${suppressionReason}`);
           sendResponse({ ok: true, riskScore: TAB_BEHAVIOR_RISK.get(tabId) ?? 0, suppressed: true, reason: suppressionReason });
           return true;
         }
@@ -1955,7 +2198,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // For low-trust domains, require supporting malicious signals
         if (trustTier === "low" && currentRisk < 15) {
           suppressionReason = "Clipboard access detected but no supporting malicious signals on low-trust domain";
-          console.log(`[Sentinel] 🛑 Clipboard suppressed: ${suppressionReason}`);
+          console.log(`[Sentinel] ðŸ›‘ Clipboard suppressed: ${suppressionReason}`);
           sendResponse({ ok: true, riskScore: TAB_BEHAVIOR_RISK.get(tabId) ?? 0, suppressed: true, reason: suppressionReason });
           return true;
         }
@@ -1968,8 +2211,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         hidden_download_anchor: 15,
         blob_download: 15,
         hidden_iframe: 12,
-        clipboard_hijack: 15,  // Reduced from 18 — clipboard alone is not strong signal
-        clipboard_write: 10,   // Reduced from 12 — requires supporting signals
+        clipboard_hijack: 15,  // Reduced from 18 â€” clipboard alone is not strong signal
+        clipboard_write: 10,   // Reduced from 12 â€” requires supporting signals
         redirect_loop: 15,
         phishing_detected: 20,
         sensitive_data_entry: 20,
@@ -1981,9 +2224,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const cappedDelta = signalCount <= 1 ? Math.min(30, delta) : delta;
       let newRisk = Math.min(100, prevRisk + cappedDelta);
       
-      // ═══════════════════════════════════════════════════════════════════
+      // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
       // MAXIMUM RISK CAP (v3.0)
-      // ═══════════════════════════════════════════════════════════════════
+      // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
       // Only allow risk > 40 if clipboard_hijack is accompanied by strong signals
       if (processingEvent === "clipboard_hijack" || processingEvent === "clipboard_write") {
         const otherSignals = [
@@ -1995,12 +2238,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ];
         
         // Check if we have other strong signals in the behavioral history
-        // (This is a simplified check — in production could maintain full signal list)
+        // (This is a simplified check â€” in production could maintain full signal list)
         const hasStrongSupport = newRisk >= 50; // If already at high risk from other signals
         
         if (!hasStrongSupport && newRisk > 40) {
           newRisk = 40; // Cap clipboard-only risk at 40
-          console.log(`[Sentinel] 📊 Risk capped at 40: clipboard without strong supporting signals`);
+          console.log(`[Sentinel] ðŸ“Š Risk capped at 40: clipboard without strong supporting signals`);
         }
       }
       
@@ -2009,11 +2252,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       TAB_BEHAVIOR_RISK.set(tabId, newRisk);
 
-      console.log(`[Sentinel] 🔍 Behavior: ${processingEvent} (${severity}) tab=${tabId} risk=${newRisk}`);
+      console.log(`[Sentinel] ðŸ” Behavior: ${processingEvent} (${severity}) tab=${tabId} risk=${newRisk}`);
       console.log(`[Sentinel AI] Signal: ${processingEvent}`);
       console.log(`[Sentinel AI] Trusted: ${trustedEventDomain}`);
 
-      // Trigger overlay if: severity is high OR accumulated risk ≥ 30
+      // Trigger overlay if: severity is high OR accumulated risk â‰¥ 30
       const shouldAlert = severity === "high" || newRisk >= 30;
       console.log(`[Sentinel AI] Action: ${shouldAlert ? "alerted" : "ignored"}`);
       if (shouldAlert) {
@@ -2106,7 +2349,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     case "sentinel:get-tab-risk": {
-      // Returns the current tab's accumulated behavior risk score (0–100)
+      // Returns the current tab's accumulated behavior risk score (0â€“100)
       const riskTabId = sender?.tab?.id ?? message.tabId;
       sendResponse({ riskScore: TAB_BEHAVIOR_RISK.get(riskTabId) ?? 0 });
       return true;
@@ -2165,9 +2408,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 11b — THREAT INTELLIGENCE LOADER
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 11b â€” THREAT INTELLIGENCE LOADER
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 /**
  * Fetches threatIntel.json from the extension bundle and injects the data
@@ -2203,7 +2446,7 @@ async function loadThreatIntelDB() {
       sentinel_threat_intel_ts: Date.now(),
     });
 
-    console.log("[Sentinel] 🗒️ Threat intel loaded:",
+    console.log("[Sentinel] ðŸ—’ï¸ Threat intel loaded:",
       (data.phishingDomains?.length ?? 0), "domains,",
       (data.scamKeywords?.length    ?? 0), "keywords");
   } catch (e) {
@@ -2211,13 +2454,13 @@ async function loadThreatIntelDB() {
   }
 }
 
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 12 — SERVICE WORKER LIFECYCLE
-// ══════════════════════════════════════════════════════════════════════
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// SECTION 12 â€” SERVICE WORKER LIFECYCLE
+// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 
 chrome.runtime.onInstalled.addListener((details) => {
-  console.log("[Sentinel] 🚀 Extension installed/updated:", details.reason);
+  console.log("[Sentinel] ðŸš€ Extension installed/updated:", details.reason);
   // Load threat intel on install/update so new domains are available immediately
   loadThreatIntelDB();
   if (details.reason === "install") {
@@ -2246,7 +2489,7 @@ chrome.runtime.onInstalled.addListener((details) => {
 });
 
 chrome.runtime.onStartup.addListener(() => {
-  console.log("[Sentinel] ⏰ Service worker restarted — LRU cache cleared");
+  console.log("[Sentinel] â° Service worker restarted â€” LRU cache cleared");
   loadThreatIntelDB(); // Refresh threat intel after SW restart
 });
 
@@ -2259,5 +2502,5 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // Load threat intel immediately on first SW initialization
 loadThreatIntelDB();
 
-console.log("[Sentinel] ✅ Service worker initialized v3.0.0 — Adaptive Intelligence Active");
+console.log("[Sentinel] âœ… Service worker initialized v3.0.0 â€” Adaptive Intelligence Active");
 
