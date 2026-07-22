@@ -43,59 +43,21 @@
 
 "use strict";
 
+const SENSITIVITY_THRESHOLDS = {
+  low: { suspiciousScore: 50, safeConfidence: 50 },
+  medium: { suspiciousScore: 30, safeConfidence: 65 },
+  high: { suspiciousScore: 15, safeConfidence: 80 },
+};
+let CURRENT_SENSITIVITY = "medium";
+
+function setSensitivityMode(mode) {
+  const normalized = String(mode || "").toLowerCase();
+  CURRENT_SENSITIVITY = SENSITIVITY_THRESHOLDS[normalized] ? normalized : "medium";
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // SECTION 1 — STATIC DATA SETS
 // ═══════════════════════════════════════════════════════════════════
-
-/**
- * Tier-1 trusted root domains (eTLD+1).
- * Matching is EXACT root-domain only — subdomains are derived.
- * "google.com.evil.xyz" → root = "evil.xyz" → NOT trusted.
- * 
- * CRITICAL: Trusted domains bypass ALL scoring. If a login form appears
- * on a trusted domain, it is SAFE. On non-trusted domains, a login form
- * requires additional suspicious indicators (brand mismatch, high-risk TLD, etc.)
- */
-const TRUSTED_ROOT_DOMAINS = new Set([
-  "google.com", "googleapis.com", "googlevideo.com", "gstatic.com",
-  "youtube.com", "youtu.be",
-  "bing.com", "microsoft.com", "microsoftonline.com",
-  "live.com", "outlook.com", "office.com", "office365.com",
-  "sharepoint.com", "azure.com", "azurewebsites.net",
-  "github.com", "githubusercontent.com", "githubassets.com", "npmjs.com",
-  "apple.com", "icloud.com", "mzstatic.com",
-  "amazon.com", "amazonaws.com", "cloudfront.net",
-  "facebook.com", "instagram.com", "whatsapp.com", "meta.com",
-  "twitter.com", "x.com", "twimg.com",
-  "linkedin.com", "licdn.com",
-  "wikipedia.org", "wikimedia.org",
-  "reddit.com", "redd.it", "redditmedia.com",
-  "stackoverflow.com", "stackexchange.com",
-  "cloudflare.com", "cloudflare.net",
-  "openai.com", "chatgpt.com",
-  "stripe.com", "paypal.com",
-  "netflix.com", "nflximg.com",
-  "medium.com", "wordpress.org", "wordpress.com",
-  "mozilla.org", "firefox.com",
-  "duckduckgo.com", "yahoo.com", "baidu.com",
-  "gov.in", "nic.in",
-  // Indian educational institutions (christuniversity.in, etc.)
-  "christuniversity.in", "du.ac.in", "iit.ac.in", "iitb.ac.in",
-  "iitd.ac.in", "iitm.ac.in", "bits-pilani.ac.in", "vtu.ac.in",
-]);
-
-const TRUSTED_DOMAINS = [
-  "google.com",
-  "microsoft.com",
-  "apple.com",
-  "amazon.com",
-  "edu",
-  "gov",
-  // Indian academic TLD patterns
-  "ac.in",
-  "edu.in",
-  "org.in",
-];
 
 /**
  * Search engine hosts — bypass keyword scoring for query parameters.
@@ -107,6 +69,11 @@ const SEARCH_ENGINE_HOSTS = new Set([
   "duckduckgo.com", "www.duckduckgo.com",
   "search.brave.com", "ecosia.org",
   "startpage.com", "baidu.com",
+]);
+
+const SAFE_NEUTRAL_TLDS = new Set([
+  "in", "edu", "ac.in", "gov.in", "org", "net", "co.in",
+  "ac.uk", "gov.uk", "edu.au", "gov.au", "ac.za"
 ]);
 
 /**
@@ -147,15 +114,8 @@ const PHISHING_DATASET = new Set([
  * Ordered by abuse prevalence.
  */
 const HIGH_RISK_TLDS = new Set([
-  // Free/near-free registrars with weak abuse controls
-  "xyz", "tk", "ml", "ga", "cf", "gq", "pw",
-  // High-abuse generic TLDs
-  "top", "club", "online", "site", "web", "space", "store",
-  // Country TLDs with abuse issues
-  "ru", "cn", "cc", "ws", "su", "to",
-  // Aggressive new gTLDs
-  "info", "biz", "click", "link", "live", "stream",
-  // Google-released gTLDs being abused for phishing
+  "tk", "ml", "cf", "ga", "gq",
+  "xyz", "top", "click", "link",
   "zip", "mov",
 ]);
 
@@ -362,6 +322,12 @@ function getRootDomain(hostname) {
   return lastTwo;
 }
 
+function getRegistrableDomain(hostname) {
+  var parts = String(hostname || "").toLowerCase().split(".").filter(Boolean);
+  if (parts.length <= 2) return String(hostname || "").toLowerCase();
+  return parts.slice(-2).join(".");
+}
+
 /**
  * Applies homoglyph normalization to a token.
  * Used BEFORE brand comparison to catch Unicode-based spoofing.
@@ -382,6 +348,53 @@ function tokenize(text) {
   return String(text || "").toLowerCase().split(/[^a-z0-9]+/).filter(t => t.length > 0);
 }
 
+const BENIGN_QUERY_PARAMS = new Set([
+  "utm_source", "utm_medium", "utm_campaign", "utm_content", "utm_term",
+  "utm_id", "gclid", "fbclid", "msclkid", "dclid", "ttclid",
+  "ref", "referrer", "source", "affiliate_id",
+  "ptype", "skuld", "skuid", "productid", "variant",
+  "color", "size", "quantity", "pid", "sku",
+  "p", "icn", "ici", "intcmp", "cmp"
+]);
+
+const LEGITIMATE_URL_PATTERNS = [
+  /\/p\/[a-zA-Z0-9\-]+/,
+  /\/product\/[a-zA-Z0-9\-]+/,
+  /\/dp\/[A-Z0-9]{10}/,
+  /\/buy\/[a-zA-Z0-9\-]+/,
+  /\/category\//,
+  /\/collections\//,
+  /\/c\//,
+  /\/medicines\//,
+  /\/otc\//,
+  /\/prescription\//,
+  /\/cart/,
+  /\/checkout/,
+  /\/order/,
+];
+
+function stripBenignParams(url) {
+  try {
+    const u = new URL(url);
+    const stripped = new URL(u.origin + u.pathname);
+    let hadTrackingParams = false;
+    for (const [k, v] of u.searchParams) {
+      if (!BENIGN_QUERY_PARAMS.has(String(k || "").toLowerCase())) {
+        stripped.searchParams.set(k, v);
+      } else {
+        hadTrackingParams = true;
+      }
+    }
+    return { cleanUrl: stripped.toString(), hadTrackingParams };
+  } catch {
+    return { cleanUrl: url, hadTrackingParams: false };
+  }
+}
+
+function hasLegitimateUrlStructure(pathname) {
+  return LEGITIMATE_URL_PATTERNS.some(p => p.test(pathname));
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // SECTION 3 — SIGNAL DETECTORS
 // ═══════════════════════════════════════════════════════════════════
@@ -396,21 +409,29 @@ function tokenize(text) {
  */
 function checkTrusted(hostname) {
   if (!hostname) return false;
-  const root = getRootDomain(hostname);
-  if (TRUSTED_ROOT_DOMAINS.has(root)) return true;
-  // Direct hostname match for explicitly listed domains
-  if (TRUSTED_ROOT_DOMAINS.has(hostname)) return true;
-  return TRUSTED_DOMAINS.some(domain => {
-    // Handle TLD-only patterns like "edu", "gov", "ac.in"
-    if (domain.includes(".")) {
-      // Multi-part pattern (e.g. "ac.in") — match as suffix
-      return root.endsWith(`.${domain}`) || root === domain ||
-             hostname.endsWith(`.${domain}`) || hostname === domain;
-    }
-    return domain === "edu" || domain === "gov"
-      ? root.endsWith(`.${domain}`) || root === domain
-      : root === domain || root.endsWith(`.${domain}`);
-  });
+  if (typeof globalThis.isTrustedDomain === "function") {
+    return globalThis.isTrustedDomain(hostname);
+  }
+  return false;
+}
+
+function getTldSuffix(hostname) {
+  const parts = String(hostname || "").toLowerCase().split(".").filter(Boolean);
+  if (parts.length < 2) return "";
+  const lastTwo = parts.slice(-2).join(".");
+  if (SAFE_NEUTRAL_TLDS.has(lastTwo)) return lastTwo;
+  return parts[parts.length - 1] || "";
+}
+
+function isTrustedEducationDomain(hostname) {
+  var patterns = [
+    /\.edu$/i, /\.ac\.[a-z]{2,4}$/i, /\.edu\.[a-z]{2,4}$/i,
+    /\.gov\.[a-z]{2,4}$/i, /\.gov$/i,
+    /university\./i, /\.university/i,
+    /college\./i, /\.college/i,
+    /institute\./i, /\.institute/i
+  ];
+  return patterns.some(function (p) { return p.test(hostname); });
 }
 
 /**
@@ -493,7 +514,10 @@ function checkPunycode(hostname) {
  */
 function checkTLD(hostname) {
   const parts = hostname.split(".");
-  const tld = parts.length >= 2 ? parts[parts.length - 1].toLowerCase() : "";
+  const tld = getTldSuffix(hostname) || (parts.length >= 2 ? parts[parts.length - 1].toLowerCase() : "");
+  if (SAFE_NEUTRAL_TLDS.has(tld)) {
+    return { score: 0, tld, isHighRisk: false };
+  }
   if (tld && HIGH_RISK_TLDS.has(tld)) {
     return { score: 3, tld, isHighRisk: true };
   }
@@ -560,6 +584,96 @@ function checkDomainStructure(hostname) {
   }
 
   return { score, signals, reasons };
+}
+
+function scoreSubdomainRisk(hostname) {
+  var parts = String(hostname || "").split(".").filter(Boolean);
+  if (parts.length <= 2) return { score: 0, signals: [], reasons: [] };
+
+  var subdomain = parts.slice(0, -2).join(".");
+  var signals = [];
+  var reasons = [];
+  var score = 0;
+  var randomCheck = typeof globalThis.isRandomSubdomain === "function"
+    ? globalThis.isRandomSubdomain(subdomain)
+    : false;
+
+  if (subdomain.length > 25) {
+    score += 25;
+    signals.push("Unusually long subdomain");
+    reasons.push("Unusually long subdomain");
+  } else if (subdomain.length > 15) {
+    score += 12;
+    signals.push("Long subdomain pattern");
+    reasons.push("Long subdomain pattern");
+  }
+
+  if (randomCheck) {
+    score += 30;
+    signals.push("Subdomain looks algorithmically generated");
+    reasons.push("Subdomain looks algorithmically generated");
+  }
+
+  var longWords = subdomain.match(/[a-z]{6,}/g) || [];
+  if (longWords.length >= 3 && subdomain.length > 18) {
+    score += 20;
+    signals.push("Unusual multi-word subdomain pattern");
+    reasons.push("Unusual multi-word subdomain pattern");
+  }
+
+  if (parts.length > 4) {
+    score += 15;
+    signals.push("Deeply nested subdomain");
+    reasons.push("Deeply nested subdomain");
+  }
+
+  return { score: Math.min(score, 60), signals, reasons };
+}
+
+function scoreProtocolRisk(url) {
+  var signals = [];
+  var reasons = [];
+  var score = 0;
+  try {
+    var parsed = new URL(url);
+    if (parsed.protocol === "http:") {
+      score += 20;
+      signals.push("Unencrypted HTTP connection");
+      reasons.push("Unencrypted HTTP connection");
+    }
+    if (parsed.protocol === "http:" && parsed.hostname.split(".").length > 3) {
+      score += 15;
+      signals.push("HTTP on non-root subdomain");
+      reasons.push("HTTP on non-root subdomain");
+    }
+    if (parsed.port && ["80", "443", ""].indexOf(parsed.port) === -1) {
+      score += 10;
+      signals.push("Non-standard port");
+      reasons.push("Non-standard port: " + parsed.port);
+    }
+  } catch (_) {}
+  return { score, signals, reasons };
+}
+
+/** HTTPS host at apex or www-only — skip protocol/subdomain risk heuristics (no random/deep host). */
+function isCleanHttpsApexHostname(hostname, parsed) {
+  if (!parsed || parsed.protocol !== "https:") return false;
+  const parts = String(hostname || "").split(".").filter(Boolean);
+  if (parts.length <= 2) return true;
+  if (parts.length === 3 && parts[0] === "www") return true;
+  return false;
+}
+
+/** Up to 20 points off when HTTPS + registrable apex is allowlisted and host passes trusted-domain rules. */
+function applyTrustedApexHttpsScoreDiscount(hostname, parsed, totalScore) {
+  if (!parsed || parsed.protocol !== "https:" || totalScore <= 0) return totalScore;
+  const apex = getRootDomain(hostname);
+  const apexSet = globalThis.TRUSTED_APEX_DOMAINS;
+  if (!(apexSet instanceof Set) || !apexSet.has(apex)) return totalScore;
+  if (typeof globalThis.isTrustedDomain !== "function" || !globalThis.isTrustedDomain(hostname)) {
+    return totalScore;
+  }
+  return Math.max(0, totalScore - Math.min(20, totalScore));
 }
 
 /**
@@ -1032,7 +1146,9 @@ function checkNestedUrl(searchParams) {
 
     // Check 3: Is nested destination a high-risk TLD with phishing keywords?
     const nestedRootDomain = getRootDomain(nestedHostname);
-    const nestedTrusted = TRUSTED_ROOT_DOMAINS.has(nestedRootDomain);
+    const nestedTrusted = typeof globalThis.isTrustedDomain === "function"
+      ? globalThis.isTrustedDomain(nestedRootDomain)
+      : false;
     if (!nestedTrusted) {
       const nestedTld = checkTLD(nestedHostname);
       const nestedKeywords = checkKeywords(nestedHostname, "", nestedUrl);
@@ -1058,6 +1174,21 @@ function checkNestedUrl(searchParams) {
 // ═══════════════════════════════════════════════════════════════════
 // SECTION 4 — CLASSIFICATION & OUTPUT BUILDERS
 // ═══════════════════════════════════════════════════════════════════
+
+/** URL-heuristic signal labels treated as trust/info (excluded from threat-signal counts). */
+function isTrustOrInfoSignalLabel(label) {
+  const t = String(label || "").toLowerCase().trim();
+  return t === "trusted_domain" || t === "search engine";
+}
+
+/** Native browser permission UI is not weighted as a site threat. */
+function shouldSkipNativePermissionSignal(signal) {
+  if (!signal || typeof signal !== "object") return false;
+  return (
+    signal.type === "permission_prompt" &&
+    (signal.source === "browser_native" || signal.origin === "chrome")
+  );
+}
 
 /**
  * CRITICAL: Signal Correlation Engine (v2.1)
@@ -1212,8 +1343,14 @@ function classifyAttackType(flags) {
  */
 function calculateSoftRisk(signals) {
   if (!Array.isArray(signals) || signals.length === 0) return 0;
+  let n = 0;
+  for (const s of signals) {
+    // Native browser UI (notification/location prompts) is not a site-level threat
+    if (shouldSkipNativePermissionSignal(s)) continue;
+    n++;
+  }
   // Each signal contributes at most 2 points; cap total at 10
-  return Math.min(10, signals.length * 2);
+  return Math.min(10, n * 2);
 }
 
 /**
@@ -1253,6 +1390,10 @@ function forceSafeResult(signals, trusted) {
 }
 
 function buildResult(status, score, reasons, signals, appliedRule, flags = {}) {
+  const distinctThreatForConf = [...new Set(
+    (Array.isArray(signals) ? signals.filter(Boolean).map(s => String(s)) : [])
+  )].filter((l) => !isTrustOrInfoSignalLabel(l)).length;
+
   // ── CAP 1: Single signal max 30 points ─────────────────────────────
   // This prevents one isolated signal from dominating the score
   let cappedScore = Math.min(score, 30);
@@ -1266,15 +1407,53 @@ function buildResult(status, score, reasons, signals, appliedRule, flags = {}) {
   if (!hasAnyHighMediumSignal && cappedScore > 20) {
     cappedScore = 20;
   }
+  if (flags.isEducationDomain) {
+    cappedScore = Math.min(cappedScore, 8);
+    status = status === "malicious" ? "malicious" : "safe";
+  }
+  let riskScore100 = Math.max(0, Math.min(100, Math.round((cappedScore / 30) * 100)));
+  if (typeof flags.forcedScore === "number") {
+    riskScore100 = Math.max(0, Math.min(100, Math.round(flags.forcedScore)));
+  }
+
+  // CHANGED: False-positive fix (education/institution domain cap) (Part 3)
+  var domain = String(flags && flags.__domain ? flags.__domain : "");
+  var SAFE_TLDS = ['.edu', '.gov', '.ac', '.ac.in', '.edu.in'];
+  var SAFE_KEYWORDS = ['university', 'college', 'school', 'hospital',
+                       'institute', 'academy', 'polytechnic'];
+
+  var isSafeTLD = SAFE_TLDS.some(function(tld) {
+    return domain.endsWith(tld);
+  });
+  var hasSafeKeyword = SAFE_KEYWORDS.some(function(kw) {
+    return domain.toLowerCase().includes(kw);
+  });
+
+  if (isSafeTLD || hasSafeKeyword) {
+    riskScore100 = Math.min(riskScore100, 28); // cap below toast threshold
+  }
+
+  // CHANGED: WHOIS timeout = neutral, not risky (Part 3)
+  if (flags && flags.whoisTimeout === true) {
+    riskScore100 = Math.max(0, riskScore100 - 20);
+  }
   
   // Confidence: calibrated so score=0 → 5%, score=10 → 99%
-  const rawConf = status === "safe"
+  let rawConf = status === "safe"
     ? Math.max(5, 10 - cappedScore * 2)
     : Math.min(99, Math.max(40, 35 + cappedScore * 6 + signals.length * 3));
+  if (typeof flags.forcedConfidence === "number") {
+    rawConf = Math.max(0, Math.min(100, Math.round(flags.forcedConfidence)));
+  }
+
+  // FIX 6 — Apply confidence floor for unknown/new domains (no reputation data)
+  if (flags.confidenceFloor && rawConf > flags.confidenceFloor * 100) {
+    rawConf = flags.confidenceFloor * 100;
+  }
 
   const trustScore = status === "safe"
-    ? Math.min(100, Math.max(70, 100 - cappedScore * 5))
-    : Math.max(0, 100 - cappedScore * 10);
+    ? Math.min(100, Math.max(70, 100 - riskScore100))
+    : Math.max(0, 100 - riskScore100);
 
   const attackType = classifyAttackType(flags);
 
@@ -1294,12 +1473,72 @@ function buildResult(status, score, reasons, signals, appliedRule, flags = {}) {
     sources.push({ name: "Heuristic Engine", verdict: "safe", triggered: false, detail: "No threats identified" });
   }
 
+  const reasonMap = {
+    threat_test_domain: "This domain is a known security test site (e.g. EICAR). It simulates malware/phishing for testing purposes.",
+    no_ssl: "Page is served over HTTP with no SSL encryption. Credentials entered here are at risk.",
+    young_domain: "Domain was registered recently (under 30 days). New domains are disproportionately used for phishing.",
+    suspicious_pattern: "URL contains patterns commonly associated with phishing or malware delivery.",
+    redirect_chain: "Page redirected multiple times before settling. This is a common technique used to obscure malicious destinations.",
+    "signals below malicious correlation threshold": "No strong threat signals found for this page.",
+    "Insufficient confidence to confirm safe — flagged for review": "We couldn't gather enough data to fully verify this page.",
+    "Subdomain of trusted parent — score reduced by 30": "This appears to be a subdomain of a trusted website.",
+    "Education/government domain — threat cap applied": "This is an education or government domain — treated with higher trust.",
+    "Known security test domain — treat as suspicious": "This website is used to simulate cyber attacks for testing purposes.",
+    login_page_unverified_domain: "This appears to be a login page on a domain we haven't verified before. Avoid entering passwords unless you trust this site.",
+    trusted_domain: "Verified safe domain",
+    "Unencrypted HTTP connection": "Page loaded over unencrypted HTTP (not HTTPS)",
+    "HTTP on non-root subdomain": "Unencrypted connection on a nested subdomain",
+    "Unusually long subdomain": "Domain name has an abnormally long subdomain",
+    "Subdomain looks algorithmically generated": "Subdomain pattern looks randomly generated",
+    "Unusual multi-word subdomain pattern": "Subdomain uses an unusual multi-word structure",
+    "Deeply nested subdomain": "URL has many nested subdomain levels",
+    "Non-standard port": "Site uses a non-standard network port",
+  };
+
   const safeReasons = Array.isArray(reasons)
     ? Array.from(new Set(reasons.filter(Boolean).map(r => String(r))))
     : [];
   const safeSignals = Array.isArray(signals)
     ? Array.from(new Set(signals.filter(Boolean).map(s => String(s))))
     : [];
+  const humanReasons = safeReasons.map((item) => {
+    const mapped = reasonMap[item] || item;
+    if (/threshold|correlation|heuristic|pipeline|cap applied/i.test(mapped)) {
+      return "No strong threat signals found for this page.";
+    }
+    return mapped;
+  });
+
+  const thresholds = SENSITIVITY_THRESHOLDS[CURRENT_SENSITIVITY] || SENSITIVITY_THRESHOLDS.medium;
+
+  if (status === "safe" && rawConf < thresholds.safeConfidence) {
+    status = "suspicious";
+    humanReasons.unshift("We couldn't gather enough data to fully verify this page.");
+  }
+  if (status === "safe" && riskScore100 >= thresholds.suspiciousScore) {
+    status = "suspicious";
+  }
+  if (status === "suspicious" && riskScore100 < thresholds.suspiciousScore && rawConf >= thresholds.safeConfidence) {
+    status = "safe";
+  }
+
+  if (typeof globalThis.resolveStatus === "function") {
+    const signalObjs = safeSignals.map((s) =>
+      typeof s === "string" ? { type: "signal", label: s } : s
+    );
+    if (status === "suspicious" && globalThis.resolveStatus(riskScore100, signalObjs, rawConf) === "uncertain") {
+      status = "uncertain";
+    }
+  }
+
+  // Confidence: cap by distinct threat-signal evidence (3 signals → 54%, 1 → 18%)
+  let confidenceOut = rawConf;
+  if (typeof flags.forcedConfidence !== "number") {
+    const evidenceCapConfidence = Math.min(100, distinctThreatForConf * 18);
+    if (status !== "safe") {
+      confidenceOut = Math.min(rawConf, evidenceCapConfidence);
+    }
+  }
 
   // ── XAI++ structured breakdown (Part 4) ─────────────────────────────
   // Derives a four-dimension human-readable breakdown from flags + signals.
@@ -1341,12 +1580,13 @@ function buildResult(status, score, reasons, signals, appliedRule, flags = {}) {
 
   return {
     status,
-    score: Number(cappedScore.toFixed(1)),
-    confidence: rawConf,
+    score: riskScore100,
+    finalRiskScore: riskScore100,
+    confidence: confidenceOut,
     trustScore,
     attackType,
-    reason: safeReasons.join("; ") || (status === "safe" ? "No malicious signals detected" : "Detected threat"),
-    reasons: safeReasons,
+    reason: humanReasons.join("; ") || (status === "safe" ? "No malicious signals detected" : "Detected threat"),
+    reasons: humanReasons,
     signals: safeSignals,
     sources,
     appliedRule,
@@ -1382,10 +1622,40 @@ function buildResult(status, score, reasons, signals, appliedRule, flags = {}) {
  *   DECISION MATRIX based on accumulated score + signal flags
  *
  * @param {string} rawUrl — The raw URL to analyze
+ * @param {{ forceDeep?: boolean }} [opts]
  * @returns {object} Structured result (see OUTPUT CONTRACT above)
  */
-function analyzeUrl(rawUrl) {
+function analyzeUrl(rawUrl, opts = {}) {
   try {
+    // HIGH-REPUTATION SHORT CIRCUIT
+    // Well-known safe domains get "safe" with high confidence immediately.
+    // This prevents SPA sites (chatgpt.com, google.com, etc.) from
+    // triggering "uncertain" overlays due to low signal count.
+    var inputUrl = String(rawUrl || "").trim();
+    if (
+      typeof globalThis.isHighReputationDomain === "function" &&
+      globalThis.isHighReputationDomain(inputUrl)
+    ) {
+      const isHTTPS = inputUrl.toLowerCase().startsWith("https://");
+      if (isHTTPS) {
+        return {
+          score: 0,
+          status: "safe",
+          confidence: 92,
+          signals: [{ type: "trust", value: "High-reputation domain" }],
+          reasons: ["Verified high-reputation domain — no threats detected."]
+        };
+      }
+      // If somehow on HTTP, downgrade confidence but still low threat
+      return {
+        score: 10,
+        status: "safe",
+        confidence: 70,
+        signals: [{ type: "info", value: "Known domain on HTTP" }],
+        reasons: ["Known domain. HTTP detected — consider using HTTPS version."]
+      };
+    }
+
     // ════════════════════════════════════════════════════════════════════
     // STRICT PIPELINE ORDER (Task requirement §1)
     // Step 1: Collect signals
@@ -1399,6 +1669,9 @@ function analyzeUrl(rawUrl) {
 
     // ── Step 1: Normalize ────────────────────────────────────────────────
     const { normalized, parsed, wasEncoded } = normalizeUrl(rawUrl);
+    const stripped = stripBenignParams(normalized);
+    const normalizedForHeuristics = stripped.cleanUrl;
+    const hadTrackingParams = stripped.hadTrackingParams;
 
     // ── Step 2: Scheme guard ─────────────────────────────────────────────
     if (!parsed || !["http:", "https:"].includes(parsed.protocol)) {
@@ -1408,17 +1681,84 @@ function analyzeUrl(rawUrl) {
     const hostname = parsed.hostname.toLowerCase();
     const pathname = parsed.pathname;
     const search = parsed.search;
+    const earlyLoginPath = /\/(login|signin|sign-in|auth|account|password|credential)/i.test(pathname || "");
+    const earlyFinancialPhishWords = /(paytm|kyc|verify|update|wallet|bank|gift|winner|offer)/i;
 
     if (!hostname) {
       return buildResult("safe", 0, [], [], "NO_HOSTNAME", {});
     }
 
-    const rootDomain = getRootDomain(hostname);
+    // Generic HTTP login forms on unknown domains should be uncertain, not blocked.
+    if (
+      parsed.protocol === "http:" &&
+      earlyLoginPath &&
+      !earlyFinancialPhishWords.test(hostname) &&
+      !HIGH_RISK_TLDS.has(getTldSuffix(hostname) || "")
+    ) {
+      return buildResult(
+        "suspicious",
+        14,
+        ["HTTP login form on unknown domain — verify the site before entering credentials."],
+        ["http_login_unknown_domain"],
+        "EARLY_HTTP_LOGIN_UNCERTAIN",
+        { __domain: hostname }
+      );
+    }
 
-    // ── Pipeline Step 2: Trusted domain check (BEFORE scoring) ───────────
-    // CRITICAL: This is evaluated BEFORE any signals are scored so that
-    // trusted domains can never accumulate a high score from false signals.
+    // FIX 2 — Known threat test domains (MUST RUN FIRST, before EDU/GOV caps, before trusted-parent reduction)
+    const KNOWN_THREAT_TEST_DOMAINS = [
+      "eicar.org",
+      "eicar.com",
+      "testsafebrowsing.appspot.com",
+      "malware.testing.google.test",
+      "wicar.org",
+      "amtso.org",
+    ];
+
+    const isThreatTestDomain = KNOWN_THREAT_TEST_DOMAINS.some(d =>
+      hostname.endsWith(d) || hostname === d
+    );
+
+    if (isThreatTestDomain) {
+      return buildResult(
+        "suspicious",
+        65,
+        ["Known security test domain — treat as suspicious"],
+        ["threat_test_domain"],
+        "THREAT_TEST_DOMAIN_EARLY_RETURN",
+        {}
+      );
+    }
+
+    // Check malicious list before heuristic scoring.
+    if (typeof globalThis.isMaliciousDomain === "function" && globalThis.isMaliciousDomain(hostname)) {
+      return buildResult(
+        "malicious",
+        30, // maps to 100/100 after buildResult scaling
+        ['Known malicious domain (blocklist)'],
+        ['Known malicious domain'],
+        "BLOCKLIST_MALICIOUS_DOMAIN",
+        { __domain: hostname, isBlocklisted: true, isDataset: true }
+      );
+    }
+
+    const rootDomain = getRootDomain(hostname);
+    const reg = getRegistrableDomain(hostname);
+    const isTrustedParentSubdomain = reg && reg !== hostname &&
+      typeof globalThis.isTrustedDomain === "function" &&
+      globalThis.isTrustedDomain(reg);
+    const isEduGovDomain = isTrustedEducationDomain(hostname);
+
+    // ── Pipeline Step 2: Trusted domain check (no early return) ──────────
     const trusted = checkTrusted(hostname);
+    const highRepDomain = typeof globalThis.isHighReputationDomain === "function"
+      ? globalThis.isHighReputationDomain(hostname)
+      : false;
+    const legitUrlPattern = hasLegitimateUrlStructure(pathname);
+    const queryParamCount = (() => {
+      try { return Array.from(parsed.searchParams.keys()).length; } catch { return 0; }
+    })();
+    const educationDomain = isEduGovDomain;
 
     // ── Step 4: Search engine query (also pre-scoring) ───────────────────
     if (checkSearchEngine(hostname, pathname, search)) {
@@ -1429,7 +1769,7 @@ function analyzeUrl(rawUrl) {
     // CRITICAL: Dataset hits on trusted domains are IGNORED (e.g. google.com
     // subdomains that contain phishing keywords in path).
     const dataset = checkDataset(hostname);
-    if (dataset.flag && !trusted) {
+    if (dataset.flag && !trusted && !isEduGovDomain) {
       return buildResult(
         "malicious", 10,
         [`Domain "${dataset.domain}" matched phishing/malware database`],
@@ -1456,7 +1796,7 @@ function analyzeUrl(rawUrl) {
     // ── Step 5c: Threat intel keyword check (URL-level) ──────────────────
     // Checks for scam/phishing keywords across the full URL string.
     // Softer signal — adds score rather than hard-exiting.
-    const urlLower = normalized.toLowerCase();
+    const urlLower = normalizedForHeuristics.toLowerCase();
     const tiKeyword = checkThreatIntelKeywords(urlLower);
 
     // === Accumulate scores from remaining signals ========================
@@ -1464,6 +1804,48 @@ function analyzeUrl(rawUrl) {
     const allSignals = [];
     let totalScore = 0;
     const flags = {};
+    // CHANGED: Provide domain to buildResult() for safe-domain caps (Part 3)
+    flags.__domain = hostname;
+
+    // Protocol / subdomain risk: skip on clean HTTPS apex (no extra labels, or www + registrable only).
+    const skipProtocolSubdomainHeuristics = isCleanHttpsApexHostname(hostname, parsed);
+    const protocolRisk = skipProtocolSubdomainHeuristics
+      ? { score: 0, signals: [], reasons: [] }
+      : scoreProtocolRisk(normalizedForHeuristics);
+    if (protocolRisk.score > 0) {
+      totalScore += protocolRisk.score;
+      allReasons.push(...protocolRisk.reasons);
+      allSignals.push(...protocolRisk.signals);
+      flags.protocolRisk = true;
+    }
+
+    // HTTPS + trusted host + no suspicious subdomain — drop false mid-range retail noise
+    const hostPartsEarly = hostname.split(".").filter(Boolean);
+    let subdomainForClean = "";
+    if (hostPartsEarly.length > 2) {
+      subdomainForClean = hostPartsEarly.slice(0, -2).join(".");
+    }
+    const trustedHost = checkTrusted(hostname);
+    const randomSub =
+      typeof globalThis.isRandomSubdomain === "function" &&
+      globalThis.isRandomSubdomain(subdomainForClean);
+    const isCleanHTTPS =
+      parsed.protocol === "https:" && trustedHost && !randomSub;
+    if (isCleanHTTPS) {
+      totalScore = Math.max(0, totalScore - 15);
+    }
+
+    const subdomainRisk = skipProtocolSubdomainHeuristics
+      ? { score: 0, signals: [], reasons: [] }
+      : scoreSubdomainRisk(hostname);
+    if (subdomainRisk.score > 0) {
+      const subdomainWeight = (highRepDomain && legitUrlPattern) ? 0 : 1;
+      totalScore += subdomainRisk.score * subdomainWeight;
+      allReasons.push(...subdomainRisk.reasons);
+      allSignals.push(...subdomainRisk.signals);
+      flags.subdomainRisk = true;
+      flags.hasDomainRisk = true;
+    }
 
     // Inject threat intel keyword signal into scoring pipeline
     if (tiKeyword.matched) {
@@ -1479,7 +1861,7 @@ function analyzeUrl(rawUrl) {
     }
 
     // ── Step 5d: Basic deobfuscator (Part 3) ─────────────────────────────
-    const deob = deobfuscateUrlForKeywords(normalized);
+    const deob = deobfuscateUrlForKeywords(normalizedForHeuristics);
     if (deob.matched) {
       flags.decodedSuspiciousContent = true;
       totalScore += 2; // decodedSuspiciousContent → +2
@@ -1496,7 +1878,7 @@ function analyzeUrl(rawUrl) {
 
     // ── Step 6: IP address ───────────────────────────────────────────────
     const ipCheck = checkIpAddress(hostname);
-    if (ipCheck.isIp) {
+    if (ipCheck.isIp && !isEduGovDomain) {
       flags.isIp = true;
       // Raw IP is directly malicious — hard exit
       const ipType = ipCheck.isIpv6 ? "IPv6" : "IPv4";
@@ -1546,7 +1928,8 @@ function analyzeUrl(rawUrl) {
     const structCheck = checkDomainStructure(hostname);
     if (structCheck.score > 0) {
       flags.hasDomainRisk = true;
-      totalScore += structCheck.score;
+      const structWeight = (highRepDomain && legitUrlPattern) ? 0.25 : 1;
+      totalScore += structCheck.score * structWeight;
       allReasons.push(...structCheck.reasons);
       allSignals.push(...structCheck.signals);
     }
@@ -1580,7 +1963,7 @@ function analyzeUrl(rawUrl) {
     }
 
     // ── Step 12: Keywords & intent ───────────────────────────────────────
-    const keywordCheck = checkKeywords(hostname, pathname, normalized);
+    const keywordCheck = checkKeywords(hostname, pathname, normalizedForHeuristics);
     if (keywordCheck.score > 0) {
       if (keywordCheck.hasIntent) flags.hasIntent = true;
       totalScore += keywordCheck.score;
@@ -1612,44 +1995,259 @@ function analyzeUrl(rawUrl) {
       allSignals.push(...nestedCheck.signals);
     }
 
+    // FIX 6 — Strengthen detection signals with additional heuristics
+    const urlLowercase = normalizedForHeuristics.toLowerCase();
+    if (hadTrackingParams && highRepDomain) {
+      allSignals.push("Legitimate marketing tracking parameters detected");
+      allReasons.push("Marketing/ad tracking parameters detected (normal for retail campaigns)");
+      flags.hadTrackingParams = true;
+      totalScore = Math.max(0, totalScore - 8);
+    }
+
+    if (highRepDomain && queryParamCount >= 6) {
+      allSignals.push("Legitimate product/variant query structure detected");
+      allReasons.push("Multiple URL parameters look like product variants/tracking (common on commerce sites)");
+      totalScore = Math.max(0, totalScore - 6);
+    }
+
+    if (highRepDomain && legitUrlPattern) {
+      flags.forcedConfidence = Math.max(Number(flags.forcedConfidence || 0), 75);
+      totalScore = Math.max(0, totalScore - 12);
+      const hasStrongThreats = flags.isDataset || flags.isIp || (flags.isPunycode && flags.hasIntent) || flags.hasNestedThreat;
+      if (!hasStrongThreats && totalScore < 40) {
+        return buildResult(
+          "safe",
+          totalScore,
+          ["Verified high-reputation domain with legitimate page structure"],
+          ["high_reputation_domain", "legitimate_url_pattern"],
+          "HIGH_REP_LEGIT_STRUCTURE",
+          flags
+        );
+      }
+    }
+    
+    // Suspicious URL patterns (+15 each, max combined +40)
+    const suspiciousUrlPatterns = [
+      "malware", "virus", "trojan", "phish", "eicar", "exploit"
+    ];
+    const patternMatches = suspiciousUrlPatterns.filter(p => urlLowercase.includes(p));
+    if (patternMatches.length > 0) {
+      totalScore += Math.min(15 * patternMatches.length, 40);
+      allReasons.push(`Detected suspicious URL pattern(s): ${patternMatches.join(", ")}`);
+      allSignals.push("suspicious_url_pattern");
+    }
+
+    // Check for executable extensions as path segments (not query params)
+    const executableExts = [".exe", ".bat", ".scr"];
+    const pathLower = pathname.toLowerCase();
+    const hasExecExt = executableExts.some(ext => pathLower.includes(ext));
+    if (hasExecExt) {
+      totalScore += 15;
+      allReasons.push("URL contains executable extension (.exe, .bat, .scr)");
+      allSignals.push("executable_extension");
+    }
+
+    // Login / credential page on non-top-500 domain → increase suspicion
+    const urlPath = pathname || "";
+    const isLoginPage = /\/(login|signin|sign-in|auth|account|password|credential)/i.test(urlPath);
+    if (isLoginPage && !trusted) {
+      totalScore += 15;
+      allReasons.push("Page appears to be a login or credential entry page on an unverified domain.");
+      allSignals.push("login_page_unverified_domain");
+    }
+
+    // Login page over HTTP (no SSL) → critical signal
+    if (isLoginPage && parsed.protocol === "http:") {
+      totalScore += 18;
+      allReasons.push("Login page served over HTTP — credentials would be transmitted unencrypted.");
+      allSignals.push("login_over_http");
+      // Generic HTTP login should be uncertain unless it also carries
+      // explicit financial/account-phishing wording in the hostname.
+      if (!/(paytm|kyc|verify|update|account|wallet|bank|gift|winner|offer)/i.test(hostname)) {
+        return buildResult(
+          "suspicious",
+          Math.max(totalScore, 14),
+          [...allReasons, "HTTP login form on unknown domain — caution advised"],
+          allSignals.length ? allSignals : ["http_login_unknown_domain"],
+          "HTTP_LOGIN_GENERIC_UNCERTAIN",
+          flags
+        );
+      }
+    }
+
+    // NOTE: short domain length is NOT a valid threat signal.
+    // Trusted brands often use short domains (e.g., nykaa, apple, paytm).
+
+    // Lower confidence floor for new/unknown domains (no reputation data)
+    // If domain has no signals at all, cap confidence at 0.50 to prevent false "safe"
+    if (totalScore === 0 && !trusted && !dataset.flag && !tiDomain.matched) {
+      flags.noReputationData = true;
+      flags.confidenceFloor = 0.50; // Will affect buildResult confidence calculation
+    }
+
     // ═══ DECISION MATRIX (v2.2: Strict Pipeline + Signal Correlation) ═══
 
     // ── Pipeline Step 3: Apply confidence normalization ───────────────────
     // (Already applied per-signal above; flags object carries the result)
 
-    // ── Pipeline Step 4: Downgrade signals for trusted domains ───────────
-    // For trusted domains, all scores are halved before correlation.
-    if (trusted) {
-      totalScore = Math.floor(totalScore * 0.5);
-      console.log(`[Sentinel] 🟢 Trusted: ${hostname} — score halved to ${totalScore}`);
+    // ── Pipeline Step 3b: Low-signal cap (before trust apex / trust discounts) ─
+    // Fewer than 3 distinct threat signals → score not reliable; cap mid-range noise
+    const distinctThreatSignals = [...new Set(allSignals)].filter((s) => {
+      if (s && typeof s === "object" && s.type) {
+        return s.type !== "trust" && s.type !== "info";
+      }
+      return !isTrustOrInfoSignalLabel(s);
+    });
+    const hasCriticalThreatCombo =
+      flags.hasTyposquat ||
+      (flags.hasBrandPlacement && flags.hasHighRiskTLD) ||
+      (flags.hasIntent && flags.hasHighRiskTLD) ||
+      (parsed.protocol === "http:" && /paytm|kyc|verify|update|account|winner|gift|offer/i.test(urlLowercase));
+    if (!opts.forceDeep && distinctThreatSignals.length < 3 && !hasCriticalThreatCombo) {
+      totalScore = Math.min(totalScore, 20);
+      flags.lowSignalScanCap = true;
+    }
+
+    // Raise weak unknown-domain scans into uncertain band instead of false-safe.
+    if (!trusted && flags.domainAgeHeuristicNew && totalScore >= 4 && totalScore < 11) {
+      totalScore = 12; // maps to ~40/100
+    }
+    if (!trusted && isLoginPage && parsed.protocol === "https:" && totalScore < 12) {
+      totalScore = 12; // login on unknown HTTPS domain should be uncertain, not safe.
+    }
+
+    // Targeted scam phrase hardening for common phishing constructs.
+    const scamPhraseHit =
+      /nyk4a|paytm-kyc|free-gift|free-iphone|winner|claim-prize|account-update|verify-now|offer/i.test(urlLowercase);
+    const highRiskHostPattern = flags.hasHighRiskTLD || /\.free-gift\./i.test(hostname) || /\.offer\./i.test(hostname);
+
+    // ── Pipeline Step 3c: Trusted apex + HTTPS partial discount (max −20) ─
+    const scoreBeforeApexHttpsDiscount = totalScore;
+    totalScore = applyTrustedApexHttpsScoreDiscount(hostname, parsed, totalScore);
+    if (totalScore < scoreBeforeApexHttpsDiscount) flags.trustedApexHttpsDiscountApplied = true;
+
+    // ── Pipeline Step 4: Trust discount only when raw risk is low ────────
+    const rawScoreBeforeTrust = totalScore;
+    const trustDiscountApplies = trusted && rawScoreBeforeTrust < 25;
+    if (trustDiscountApplies) {
+      totalScore = 0;
+      allReasons.unshift("Verified trusted domain");
+      allSignals.unshift("trusted_domain");
+      flags.trustDiscountApplied = true;
     }
 
     // ── Pipeline Step 5: Malicious gate (correlateSignals) ───────────────
+    if (educationDomain) {
+      flags.isEducationDomain = true;
+      totalScore = Math.min(totalScore, 8);
+      allSignals.push("education_domain");
+      allReasons.push("Recognized education domain - risk capped to safe range");
+    }
+
+    if (isEduGovDomain) {
+      const eduScore = Math.min(25, Math.max(0, totalScore));
+      const eduResult = buildResult(
+        "safe",
+        eduScore,
+        ["Education/government domain — threat cap applied", ...allReasons],
+        allSignals,
+        "EDU_GOV_DOMAIN_CAP",
+        { ...flags, isEducationDomain: true }
+      );
+      eduResult.trustLevel = "HIGH";
+      return eduResult;
+    }
+
+    if (isTrustedParentSubdomain && trustDiscountApplies) {
+      return buildResult(
+        "safe",
+        0,
+        ["Verified trusted domain", ...allReasons],
+        ["trusted_domain"],
+        "TRUSTED_PARENT_SUBDOMAIN_REDUCTION",
+        { ...flags, trustedParentSubdomain: true }
+      );
+    }
+
+    // Pre-correlation hard gates for known high-risk phishing patterns.
+    if ((flags.hasTyposquat && (flags.hasHighRiskTLD || scamPhraseHit)) || (scamPhraseHit && highRiskHostPattern)) {
+      return buildResult(
+        "malicious",
+        Math.max(totalScore, 24),
+        [...allReasons, "Known phishing naming pattern detected"],
+        allSignals.length ? allSignals : ["phishing_naming_pattern"],
+        "PRE_CORRELATION_PHISHING_PATTERN",
+        flags
+      );
+    }
+    if (
+      (flags.hasHighRiskTLD || /\.(ru|tk|xyz)$/i.test(hostname)) &&
+      /free|iphone|winner|gift|prize|claim|reward|offer/i.test(urlLowercase)
+    ) {
+      return buildResult(
+        "malicious",
+        Math.max(totalScore, 22),
+        [...allReasons, "High-risk promo scam pattern detected"],
+        allSignals.length ? allSignals : ["promo_scam_pattern"],
+        "PRE_CORRELATION_PROMO_SCAM_PATTERN",
+        flags
+      );
+    }
+    if (
+      parsed.protocol === "http:" &&
+      /(paytm|kyc|verify|update|account|wallet|bank|gift|winner|offer)/i.test(hostname)
+    ) {
+      return buildResult(
+        "malicious",
+        Math.max(totalScore, 22),
+        [...allReasons, "HTTP financial/credential phishing hostname pattern detected"],
+        allSignals.length ? allSignals : ["http_financial_phishing_pattern"],
+        "PRE_CORRELATION_HTTP_FINANCIAL_PHISHING",
+        flags
+      );
+    }
+    if (
+      parsed.protocol === "http:" &&
+      isLoginPage &&
+      !/(paytm|kyc|verify|update|account|wallet|bank|gift|winner|offer)/i.test(urlLowercase) &&
+      !flags.hasHighRiskTLD &&
+      !flags.hasTyposquat &&
+      !flags.hasBrandPlacement
+    ) {
+      return buildResult(
+        "suspicious",
+        Math.max(totalScore, 14),
+        [...allReasons, "HTTP login page on unknown domain — proceed with caution"],
+        allSignals.length ? allSignals : ["http_login_unknown_domain"],
+        "PRE_CORRELATION_HTTP_LOGIN_UNCERTAIN",
+        flags
+      );
+    }
+    if (
+      parsed.protocol === "http:" &&
+      /paytm|kyc|verify|update|account/i.test(urlLowercase) &&
+      (isLoginPage || /kyc|verify|update/i.test(urlLowercase))
+    ) {
+      return buildResult(
+        "malicious",
+        Math.max(totalScore, 22),
+        [...allReasons, "HTTP credential-update phishing pattern detected"],
+        allSignals.length ? allSignals : ["http_credential_phishing_pattern"],
+        "PRE_CORRELATION_HTTP_CREDENTIAL_PHISHING",
+        flags
+      );
+    }
+
     const correlationResult = correlateSignals(flags, totalScore, trusted);
 
     // DEBUG: Log decision
     console.log(`[Sentinel] Signal correlation: ${correlationResult.appliedRule} | Score: ${totalScore} | Trusted: ${trusted} | Verdict: ${correlationResult.severity}`);
 
-    // ── Pipeline Step 5a: If NOT malicious → forceSafeResult for trusted ──
+    // ── Pipeline Step 5a: If NOT malicious, keep moderated trusted-domain signals visible ──
     if (!correlationResult.shouldFlag) {
-      // Task requirement §3 + §1: trusted domains always return safe
-      if (trusted) {
-        const safeResult = forceSafeResult(allSignals, true);
-        if (safeResult) {
-          // Task requirement §6: debug log
-          console.log("[Sentinel Final Decision]", {
-            domain: hostname,
-            trusted,
-            signals: allSignals,
-            malicious: false,
-            risk: safeResult.risk,
-          });
-          return safeResult;
-        }
-      }
-      return buildResult("safe", 0,
+      return buildResult("safe", Math.max(0, totalScore),
         [`Signal correlation rules: ${correlationResult.reason}`],
-        ["Safe per signal rules"],
+        allSignals.length ? allSignals : ["Safe per signal rules"],
         correlationResult.appliedRule,
         flags
       );
@@ -1680,15 +2278,38 @@ function analyzeUrl(rawUrl) {
       return buildResult("malicious", totalScore, allReasons, allSignals, "TYPOSQUAT_PLUS_INTENT", flags);
     }
 
+    // Hard malicious: typosquat on high-risk TLD (e.g., nyk4a-sale.xyz)
+    if (flags.hasTyposquat && flags.hasHighRiskTLD) {
+      return buildResult("malicious", Math.max(totalScore, 24), allReasons, allSignals, "TYPOSQUAT_HIGH_RISK_TLD", flags);
+    }
+
     // Hard malicious: brand placement + intent
     if (flags.hasBrandPlacement && flags.hasIntent) {
       return buildResult("malicious", totalScore, allReasons, allSignals, "BRAND_PLACEMENT_PLUS_INTENT", flags);
+    }
+
+    // Hard malicious: brand placement on high-risk TLD with scam words
+    if (
+      flags.hasBrandPlacement &&
+      flags.hasHighRiskTLD &&
+      /free|gift|winner|offer|kyc|verify|update|claim|prize/i.test(urlLowercase)
+    ) {
+      return buildResult("malicious", Math.max(totalScore, 22), allReasons, allSignals, "BRAND_PLACEMENT_HIGH_RISK_SCAM", flags);
     }
 
     // Hard malicious: multi-keyword on high-risk TLD
     if (keywordCheck.keywords.length >= 2 && flags.hasHighRiskTLD) {
       allReasons.push(`Confirmed phishing: ${keywordCheck.keywords.length} keywords on high-risk TLD`);
       return buildResult("malicious", totalScore, allReasons, allSignals, "MULTI_KEYWORD_HIGH_RISK_TLD", flags);
+    }
+
+    // Hard malicious: promo-scam wording on high-risk TLD (e.g., free-iphone-winner.ru)
+    if (
+      flags.hasHighRiskTLD &&
+      /free|iphone|winner|gift|prize|claim|reward|offer/i.test(urlLowercase)
+    ) {
+      allReasons.push("High-risk TLD combined with promo scam wording");
+      return buildResult("malicious", Math.max(totalScore, 21), allReasons, allSignals, "PROMO_SCAM_HIGH_RISK_TLD", flags);
     }
 
     // Hard malicious: high entropy + keywords (DGA-generated phishing domain)
@@ -1722,8 +2343,23 @@ function analyzeUrl(rawUrl) {
       return buildResult("suspicious", totalScore, allReasons, allSignals, `WEAK_SIGNALS_${totalScore}`, flags);
     }
 
-    // No signals — safe
-    return buildResult("safe", 0, [], [], "NO_SIGNALS", flags);
+    // FIX 1 — SUSPICIOUS as proper third state (replaces simple safe/malicious)
+    // Decision tree at END of scoring pipeline:
+    let finalStatus = "suspicious"; // default to suspicious (never default safe)
+
+    if (totalScore >= 70) {
+      finalStatus = "malicious";
+    } else if (totalScore < 20) {
+      // Only return "safe" if BOTH: score < 20 AND high confidence (will be verified in FIX 3 guard)
+      finalStatus = "safe";
+    } else if (totalScore >= 30) {
+      finalStatus = "suspicious";
+    } else {
+      // totalScore 20-30 and < 30 check → suspicious
+      finalStatus = "suspicious";
+    }
+
+    return buildResult(finalStatus, totalScore, allReasons, allSignals, "FINAL_DECISION_TREE", flags);
 
   } catch (err) {
     // FAIL-OPEN: any unexpected error returns safe to avoid blocking legitimate browsing
@@ -1776,7 +2412,12 @@ function loadThreatIntel(data) {
 
     if (Array.isArray(data.suspiciousTLDs)) {
       for (const tld of data.suspiciousTLDs) {
-        if (typeof tld === "string") HIGH_RISK_TLDS.add(tld.trim().toLowerCase());
+        if (typeof tld === "string") {
+          const normalizedTld = tld.trim().toLowerCase().replace(/^\./, "");
+          if (normalizedTld && !SAFE_NEUTRAL_TLDS.has(normalizedTld)) {
+            HIGH_RISK_TLDS.add(normalizedTld);
+          }
+        }
       }
     }
 
@@ -2032,8 +2673,9 @@ function enrichWithML(result) {
 // path without modifying the 10+ return points inside analyzeUrl() itself.
 if (typeof globalThis !== "undefined") {
   globalThis.SentinelDetectionEngine = {
-    analyzeUrl: (rawUrl) => enrichWithML(analyzeUrl(rawUrl)),
+    analyzeUrl: (rawUrl, opts) => enrichWithML(analyzeUrl(rawUrl, opts || {})),
     loadThreatIntel,
+    setSensitivityMode,
     // Expose helpers for unit tests and the adaptive engine
     extractFeatures,
     mlScore,

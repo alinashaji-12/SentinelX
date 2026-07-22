@@ -31,7 +31,11 @@
 
 "use strict";
 
-const SENTINEL_FORCE_TEST_MODE = true;
+try {
+  importScripts("shared/sentinelResult.js");
+} catch (e) {
+  console.warn("[Sentinel] Failed to load shared/sentinelResult.js:", e?.message || e);
+}
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SECTION 1 â€” LOAD DETECTION ENGINE
@@ -39,11 +43,55 @@ const SENTINEL_FORCE_TEST_MODE = true;
 
 // importScripts is the only valid way to load external scripts in a
 // non-module MV3 service worker.
+// CHANGED: Each script in its own try/catch so one failure doesn't block others
+try { importScripts("trustedDomains.js"); } catch (e) {
+  console.error("[Sentinel] Failed to load trustedDomains.js:", e && e.message ? e.message : e);
+}
+try { importScripts("maliciousDomains.js"); } catch (e) {
+  console.error("[Sentinel] Failed to load maliciousDomains.js:", e && e.message ? e.message : e);
+}
+try { importScripts("shared/trustedDomains.js"); } catch (e) {
+  console.warn("[Sentinel] shared/trustedDomains.js not found (optional)");
+}
+try { importScripts("shared/signals.js"); } catch (e) {
+  console.warn("[Sentinel] shared/signals.js not found (optional)");
+}
+
+// CHANGED: Inline critical blocklist — always active regardless of file loading
+const CRITICAL_BLOCKLIST = new Set([
+  'neverssl.com',
+  'expired.badssl.com', 'wrong.host.badssl.com', 'self-signed.badssl.com',
+  'untrusted-root.badssl.com', 'revoked.badssl.com',
+  'paypal-secure-login.net', 'amazon-security-alert.com',
+  'microsoft-alert-security.com', 'apple-account-locked.net',
+  'gooogle.com', 'micosoft.com', 'faceb00k.com', 'paypa1.com',
+  'amaz0n.com', 'g00gle.com', 'netfl1x.com',
+]);
+
+function isHardBlocked(hostname) {
+  if (!hostname) return false;
+  const h = String(hostname || "").toLowerCase().replace(/^www\./, "");
+  if (CRITICAL_BLOCKLIST.has(h)) return true;
+  // Check if maliciousDomains.js loaded its function
+  if (typeof globalThis.isMaliciousDomain === 'function') {
+    return globalThis.isMaliciousDomain(h);
+  }
+  return false;
+}
+
 try {
   importScripts("detectionEngine.js");
 } catch (e) {
   console.error("[Sentinel] CRITICAL: Failed to load detectionEngine.js:", e);
 }
+
+// CHANGED: Keepalive alarm to prevent SW sleep during analysis
+chrome.alarms.create("sx-keepalive", { periodInMinutes: 0.4 });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "sx-keepalive") {
+    // no-op; wakes the MV3 service worker so tab analysis stays responsive
+  }
+});
 
 // Load v3.0 adaptive intelligence layer
 try {
@@ -74,24 +122,38 @@ try {
 }
 
 async function callAIAnalysis(data) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2000);
   try {
-    console.log("ðŸ§  Calling AI with:", data);
+    console.log("[Sentinel AI] Calling AI with:", data);
 
     const response = await fetch("http://localhost:3000/analyze", {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify(data)
+      body: JSON.stringify(data),
+      signal: controller.signal
     });
 
-    const result = await response.json();
-    console.log("ðŸ§  AI Response:", result);
+    if (!response.ok) {
+      throw new Error(`AI backend returned ${response.status}`);
+    }
+
+    const raw = await response.json();
+    const result = {
+      decision: typeof raw?.decision === "string" ? raw.decision : "unknown",
+      reasoning: typeof raw?.reasoning === "string" ? raw.reasoning : "",
+      confidence: typeof raw?.confidence === "number" ? clampScore(raw.confidence) : null,
+    };
+    console.log("[Sentinel AI] AI response:", result);
 
     return result;
   } catch (error) {
-    console.error("âŒ AI ERROR:", error);
+    console.warn("[Sentinel AI] AI unavailable:", error?.message || error);
     return null;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -233,8 +295,236 @@ class LRUCache {
   }
 }
 
-// Singleton cache â€” persists as long as the service worker is alive
+// Singleton cache — persists as long as the service worker is alive
 const urlCache = new LRUCache(CONFIG.CACHE_MAX_SIZE, CONFIG.CACHE_TTL_MS);
+const tabAnalysisMap = new Map();
+/** Tab IDs that requested a force-deep rescan (cleared when canonical is produced). */
+const pendingRescanForceDeep = new Map();
+// CHANGED: Ensure TAB_BEHAVIOR_RISK exists before any listener uses it
+const TAB_BEHAVIOR_RISK = new Map();
+
+// CHANGED: Retry sender for content script delivery (Part 1B)
+function notifyContentScript(tabId, result, attempt) {
+  attempt = attempt || 1;
+  chrome.tabs.sendMessage(tabId, { type: 'ANALYSIS_COMPLETE', result: result }, function(response) {
+    if (chrome.runtime.lastError) {
+      if (attempt < 4) {
+        var delay = [0, 300, 800, 2000][attempt] || 300;
+        console.log("[Sentinel] Overlay delivery retry scheduled", { tabId: tabId, attempt: attempt, delayMs: delay }); // CHANGED: observability
+        setTimeout(function() {
+          notifyContentScript(tabId, result, attempt + 1);
+        }, delay);
+      } else {
+        console.warn("[Sentinel] Fallback activated: executeScript overlay injection", { tabId: tabId }); // CHANGED: observability
+        // CHANGED: Final fallback — inject overlay directly via scripting API
+        chrome.scripting.executeScript({
+          target: { tabId: tabId },
+          func: function(analysisResult) {
+            if (window._sentinelShowOverlay) {
+              window._sentinelShowOverlay(analysisResult);
+            }
+          },
+          args: [result]
+        }, function() {
+          if (chrome.runtime.lastError) {
+            console.warn('[SentinelX] executeScript fallback failed:', chrome.runtime.lastError.message);
+          }
+        });
+      }
+    }
+  });
+}
+
+function tabAnalysisStorageKey(tabId) {
+  return "tab_analysis_" + tabId;
+}
+
+function storeTabAnalysis(tabId, result) {
+  if (!tabId || !result) return;
+  const canonical = globalThis.normalizeSentinelResult
+    ? globalThis.normalizeSentinelResult(result)
+    : result;
+  tabAnalysisMap.set(tabId, canonical);
+  const key = "tab_analysis_" + tabId;
+  const localKey = "sentinel_tab_" + tabId;
+  chrome.storage.session.set({ [key]: canonical }, () => {
+    if (chrome.runtime.lastError) {
+      console.warn("[SX] session write failed:", chrome.runtime.lastError.message);
+    }
+  });
+  chrome.storage.local.set({ [localKey]: canonical });
+
+  // FIX 5B: Track scan history (last 20 entries)
+  const historyEntry = {
+    url: canonical.url || "",
+    domain: canonical.domain || "",
+    status: canonical.status || "suspicious",
+    score: canonical.score || 0,
+    confidence: canonical.confidence || 0,
+    timestamp: Date.now()
+  };
+  
+  chrome.storage.local.get("sentinel_history", (data) => {
+    const history = Array.isArray(data.sentinel_history) ? data.sentinel_history : [];
+    history.unshift(historyEntry);
+    // Cap at 20 entries
+    const cappedHistory = history.slice(0, 20);
+    chrome.storage.local.set({ sentinel_history: cappedHistory });
+  });
+
+  // FIX 6C: Append SUSPICIOUS/MALICIOUS to incident log
+  if (canonical.status === "suspicious" || canonical.status === "malicious") {
+    const incidentEntry = {
+      url: canonical.url || "",
+      domain: canonical.domain || "",
+      status: canonical.status,
+      score: canonical.score || 0,
+      signals: canonical.signals || [],
+      timestamp: Date.now(),
+      userAgent: navigator.userAgent || "unknown"
+    };
+    
+    chrome.storage.local.get("sentinel_incidents", (data) => {
+      const incidents = Array.isArray(data.sentinel_incidents) ? data.sentinel_incidents : [];
+      incidents.unshift(incidentEntry);
+      // Cap at 100 entries
+      const cappedIncidents = incidents.slice(0, 100);
+      chrome.storage.local.set({ sentinel_incidents: cappedIncidents });
+    });
+  }
+}
+
+function getTabAnalysis(tabId, callback) {
+  const fromMap = tabAnalysisMap.get(tabId);
+  if (fromMap) {
+    callback(fromMap);
+    return;
+  }
+  chrome.storage.session.get(["tab_analysis_" + tabId], (res) => {
+    if (chrome.runtime.lastError) {
+      callback(null);
+      return;
+    }
+    const stored = res["tab_analysis_" + tabId] || null;
+    if (stored) tabAnalysisMap.set(tabId, stored);
+    callback(stored);
+  });
+}
+
+function clearTabAnalysis(tabId) {
+  tabAnalysisMap.delete(tabId);
+  chrome.storage.session.remove("tab_analysis_" + tabId, () => {
+    if (chrome.runtime.lastError) {
+      // no-op
+    }
+  });
+  try {
+    chrome.storage.local.remove("sentinel_tab_" + tabId, () => void chrome.runtime.lastError);
+  } catch (_) {}
+}
+
+function isAnalyzableTabUrl(url) {
+  return /^https?:\/\//i.test(String(url || ""));
+}
+
+try {
+  importScripts("report/threatReport.js");
+} catch (e) {
+  console.error("[Sentinel] Failed to load threat reporting module:", e);
+}
+
+function getPopupStatus(score) {
+  const s = clampScore(score);
+  if (s >= 100) return "blocked";
+  if (s >= 60) return "danger";
+  if (s >= 30) return "warn";
+  return "safe";
+}
+
+function signalWeight(type) {
+  const key = String(type || "").toLowerCase();
+  if (key.includes("known_phishing") || key.includes("malware") || key.includes("credential")) return 40;
+  if (key.includes("typosquat") || key.includes("ssl_invalid") || key.includes("clipboard")) return 30;
+  if (key.includes("new_domain") || key.includes("bulletproof") || key.includes("redirect")) return 20;
+  return 10;
+}
+
+function normalizeSignalForPopup(signal) {
+  const metaRoot = typeof SIGNAL_META === "object" && SIGNAL_META ? SIGNAL_META : {};
+  if (typeof signal === "string") {
+    const meta = metaRoot[signal] || {};
+    return {
+      type: signal,
+      name: meta.name || signal.replace(/_/g, " "),
+      weight: signalWeight(signal),
+      description: meta.description || "",
+      category: meta.category || "reputation"
+    };
+  }
+  const type = String(signal?.type || signal?.name || "signal");
+  const meta = metaRoot[type] || {};
+  return {
+    type,
+    name: String(signal?.name || meta.name || type).replace(/_/g, " "),
+    weight: Number(signal?.weight || signal?.score || signal?.contribution || signalWeight(type)),
+    description: String(signal?.description || meta.description || ""),
+    category: String(signal?.category || meta.category || "reputation"),
+    metadata: signal?.metadata || null,
+    brand: signal?.brand || signal?.targetedBrand || null
+  };
+}
+
+function normalizeSslStatus(rawUrl, result) {
+  if (result?.ssl === "valid" || result?.ssl === "invalid") return result.ssl;
+  if (result?.tlsInfo?.valid === true || result?.ssl === true) return "valid";
+  if (result?.tlsInfo?.valid === false || result?.ssl === false) return "invalid";
+  return String(rawUrl || "").startsWith("https:") ? "valid" : "invalid";
+}
+
+function generatePreventions(signals) {
+  const advice = {
+    typosquatting: "Check the real URL - a character may have been swapped",
+    credential_form: "Do not enter any passwords or card numbers",
+    clipboard_hijack: "Check your clipboard - it may have been tampered with",
+    new_domain: "This domain was registered very recently - be extra cautious",
+    ssl_invalid: "This site has no valid HTTPS - your data is not encrypted",
+    known_phishing: "This URL is in a known phishing database",
+    malware_host: "This server is a known malware distribution point",
+    bulletproof_hosting: "Hosted on infrastructure used by criminal networks"
+  };
+  const out = [];
+  for (const signal of Array.isArray(signals) ? signals : []) {
+    const type = typeof signal === "string" ? signal : (signal?.type || signal?.name || "");
+    const key = Object.keys(advice).find(k => String(type).toLowerCase().includes(k));
+    if (key && !out.includes(advice[key])) out.push(advice[key]);
+  }
+  return out;
+}
+
+function generateSuggestions(signals) {
+  const preventions = generatePreventions(signals);
+  return preventions.length ? preventions : [
+    "Verify the URL before entering sensitive data",
+    "Use the official site from a trusted bookmark",
+    "Report suspicious links to your security team"
+  ];
+}
+
+function autoBlockTab(tabId, domain) {
+  chrome.tabs.update(tabId, { url: chrome.runtime.getURL("warning.html?tab=" + tabId) }, () => {
+    void chrome.runtime.lastError;
+  });
+  if (chrome.notifications && chrome.notifications.create) {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "assets/icons/icon48.png",
+      title: "SentinelX: Threat Blocked",
+      message: "A dangerous site was automatically blocked: " + domain
+    }, () => {
+      void chrome.runtime.lastError;
+    });
+  }
+}
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SECTION 4 â€” DEDUPLICATION GUARD
@@ -390,23 +680,17 @@ function storageSet(data) {
   });
 }
 
-const TRUSTED_DOMAINS = [
-  "google.com",
-  "microsoft.com",
-  "apple.com",
-  "amazon.com",
-  "edu",
-  "gov",
-];
+function clampScore(s) {
+  const n = Number(s);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
 
 function isTrustedDomainHost(hostname) {
-  const host = String(hostname || "").toLowerCase();
-  if (!host) return false;
-  return TRUSTED_DOMAINS.some(domain => (
-    domain === "edu" || domain === "gov"
-      ? host.endsWith(`.${domain}`)
-      : host === domain || host.endsWith(`.${domain}`)
-  ));
+  if (typeof globalThis.isTrustedDomain === "function") {
+    return globalThis.isTrustedDomain(hostname);
+  }
+  return false;
 }
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -543,6 +827,27 @@ function checkSignalAggregation(behaviorSignals, domainSignals) {
     shouldAlert: false,
     reason: "no_signals"
   };
+}
+
+/**
+ * True when a behavior payload represents a browser-native permission prompt
+ * (notifications, geolocation, etc.) — must not inflate TAB_BEHAVIOR_RISK alone.
+ */
+function isBrowserNativePermissionPromptSignal(message, event, alertDetails) {
+  const details = alertDetails && typeof alertDetails === "object" ? alertDetails : {};
+  const sig = message && typeof message.signal === "object" && message.signal !== null
+    ? message.signal
+    : null;
+  if (sig && sig.type === "permission_prompt" && sig.source === "browser_native") {
+    return true;
+  }
+  if (event === "permission_prompt" && (message.source === "browser_native" || details.source === "browser_native")) {
+    return true;
+  }
+  if (details.type === "permission_prompt" && details.source === "browser_native") {
+    return true;
+  }
+  return false;
 }
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -684,13 +989,15 @@ function shouldTriggerAlert(result) {
  * @returns {boolean} true if alert should be suppressed due to trust
  */
 function isTrustAwareSuppressed(result) {
+  // CHANGED: Only suppress if EXPLICITLY in trusted domain list
+  // Do NOT suppress based on trustScore alone — that kills legit overlays
   if (!result || result.status === "malicious") return false;
-
   const risk = Number(result.finalRiskScore ?? result.finalRisk ?? result.risk ?? result.score ?? 0);
-  const trustTier = String(result.trustTier ?? result.trustLevel ?? "").toLowerCase();
-  const trustScore = Number(result.trustScore ?? 0);
-
-  return (trustTier === "high" || trustScore >= 80) && risk < 50;
+  // Only suppress if hard-override trusted domain AND risk is near zero
+  const isHardTrusted = result.appliedRule === "HARD_OVERRIDE_TRUSTED_DOMAIN" ||
+    result.appliedRule === "WHITELIST_TRUSTED_DOMAIN" ||
+    result.appliedRule === "HARD_OVERRIDE_SEARCH";
+  return isHardTrusted && risk < 15;
 }
 
 /**
@@ -699,10 +1006,10 @@ function isTrustAwareSuppressed(result) {
  * 
  * @type {object}
  */
-const ALERT_COOLDOWN = {
-  lastAlertTime: 0,
-  COOLDOWN_MS: 5000,
-};
+// CHANGED: Per-tab cooldown (same-alert burst suppression only)
+// Suppresses repeated alerts for the *same key* within COOLDOWN_MS.
+const TAB_COOLDOWN = new Map(); // tabId → { time: number, key: string }
+const COOLDOWN_MS = 5000;
 
 /**
  * Checks if alert cooldown is active.
@@ -710,8 +1017,14 @@ const ALERT_COOLDOWN = {
  * 
  * @returns {boolean}
  */
-function isCooldownActive() {
-  return Date.now() - ALERT_COOLDOWN.lastAlertTime < ALERT_COOLDOWN.COOLDOWN_MS;
+function isCooldownActive(tabId, key) {
+  const entry = TAB_COOLDOWN.get(tabId) || { time: 0, key: "" };
+  if (!key || entry.key !== key) return false;
+  return Date.now() - entry.time < COOLDOWN_MS;
+}
+
+function setCooldown(tabId, key) {
+  TAB_COOLDOWN.set(tabId, { time: Date.now(), key: String(key || "") });
 }
 
 /**
@@ -727,35 +1040,41 @@ function isCooldownActive() {
  * @param {object} result - Detection result
  * @returns {boolean} true if alert should be shown
  */
-function shouldShowAlert(result) {
+function shouldShowAlert(result, tabId) {
   if (!result) return false;
-
-  // TEMP TEST MODE:
-  // Disable cooldown/trust suppression/correlation gating so overlay flow
-  // can be validated end-to-end without blockers.
-  if (SENTINEL_FORCE_TEST_MODE) {
-    const shouldTriggerForced = shouldTriggerAlert(result);
-    if (!shouldTriggerForced) {
-      console.log("[Sentinel-AdaptiveGating] Test mode: not triggered");
-      return false;
-    }
-    ALERT_COOLDOWN.lastAlertTime = Date.now();
-    console.log("[Sentinel-AdaptiveGating] Test mode: alert approved");
-    return true;
+  
+  // Rule 1: Cooldown check
+  // CHANGED: cooldown is keyed per-tab + per-alert-type, not global
+  const riskNow = Number(result.finalRiskScore ?? result.finalRisk ?? result.risk ?? result.score ?? 0);
+  const hostNow = String(result.domain || "").toLowerCase();
+  const rootNow = hostNow ? getRootDomain(hostNow) : "";
+  const cooldownKey = `suspicious:${rootNow}:${Math.floor(riskNow / 10)}`;
+  if (isCooldownActive(tabId, cooldownKey)) {
+    console.log("[Sentinel-AdaptiveGating] Cooldown active - alert suppressed");
+    return false;
   }
-
-  // Rule 1: Trigger evaluation
+  
+  // Rule 2: Trigger evaluation
   const shouldTrigger = shouldTriggerAlert(result);
   if (!shouldTrigger) {
     console.log("[Sentinel-AdaptiveGating] ðŸ“Š Alert not triggered: insufficient risk/signals");
     return false;
   }
 
-  // Rule 2: Correlation requirement
-  if (!hasCorrelation(result.signals)) return false;
+  // Rule 3: Trust-aware suppression
+  if (isTrustAwareSuppressed(result)) {
+    console.log("[Sentinel-AdaptiveGating] High-trust suppression applied");
+    return false;
+  }
 
-  // Rule 3: All checks passed
-  ALERT_COOLDOWN.lastAlertTime = Date.now();
+  // Rule 4: Correlation requirement
+  if (!hasCorrelation(result.signals)) {
+    console.log("[Sentinel-AdaptiveGating] Low-correlation suppression applied");
+    return false;
+  }
+
+  // Rule 5: All checks passed
+  // CHANGED: tabId not available in shouldShowAlert — cooldown is set by caller
   console.log("[Sentinel-AdaptiveGating] âœ… Alert APPROVED");
   return true;
 }
@@ -779,27 +1098,11 @@ function checkFalsePositiveFilter(result, normalizedUrl) {
     return { shouldSuppress: false, reason: "url parse failed" };
   }
 
-  // Check if domain is trusted
-  const TRUSTED_DOMAINS = new Set([
-    "google.com", "googleapis.com", "googlevideo.com", "gstatic.com",
-    "youtube.com", "youtu.be",
-    "bing.com", "microsoft.com", "microsoftonline.com", "live.com", "outlook.com", "office.com",
-    "apple.com", "icloud.com", "mzstatic.com",
-    "amazon.com", "amazonaws.com",
-    "facebook.com", "instagram.com", "meta.com",
-    "twitter.com", "x.com",
-    "github.com", "githubusercontent.com",
-    "linkedin.com", "licdn.com",
-    "wikipedia.org", "wikimedia.org",
-    "stackoverflow.com", "stackexchange.com",
-    "medium.com", "wordpress.org",
-  ]);
-
   // Check if root domain is trusted
   const rootDomain = getRootDomain(hostname);
-  const isTrusted = TRUSTED_DOMAINS.has(rootDomain) || 
-                    /\.edu$|\.gov$|\.org$/.test(rootDomain) ||
-                    hostname.endsWith(rootDomain) && TRUSTED_DOMAINS.has(rootDomain);
+  const isTrusted = typeof globalThis.isTrustedDomain === "function"
+    ? globalThis.isTrustedDomain(rootDomain)
+    : false;
 
   if (!isTrusted) {
     // Unknown domain â€” don't suppress
@@ -999,9 +1302,9 @@ function normalizeReasonList(result) {
 }
 
 function computeRiskSteps(result, context) {
-  const baseRaw     = typeof result?.score === "number" ? clamp(result.score * 10, 0, 100) : 0;
-  const aiRaw       = typeof result?.aiScore === "number"
-    ? clamp(result.aiScore, 0, 100)
+  const baseRaw     = typeof result?.score === "number" ? clampScore(result.score) : 0;
+  const aiRaw       = result?.aiDecision !== "safe" && typeof result?.aiScore === "number"
+    ? clampScore(result.aiScore)
     : clamp(result?.confidence || 0, 0, 100);
   const behaviorRaw = clamp(context?.behaviorRisk || 0, 0, 100);
   const intelRaw    = clamp(context?.intel?.confidence || 0, 0, 100);
@@ -1027,7 +1330,7 @@ function computeRiskSteps(result, context) {
   // by a low AI/behavioral reading when it is highly confident.
   weighted = Math.max(weighted, mlRaw * 0.85);  // ML ceiling: 85% influence max
 
-  const finalRiskScore = Math.round(clamp(weighted, 0, 100));
+  const finalRiskScore = clampScore(weighted);
   const riskSteps = [
     `Base detection: ${Math.round(baseRaw)}/100`,
     `AI model: ${Math.round(aiRaw)}/100`,
@@ -1080,6 +1383,23 @@ async function getThreatIntelContext(hostname) {
     domainAgeDays: profile.domainAgeDays,
     serverLocation: profile.serverLocation,
   };
+}
+
+/** Low-confidence soft status: align with shared resolveStatus(score, signals, confidence). */
+function softenSuspiciousWithResolveStatus(result) {
+  if (!result || result.status !== "suspicious" || typeof globalThis.resolveStatus !== "function") return;
+  const score = Math.round(Math.min(100, Math.max(0, Number(result.score) || 0)));
+  let c = typeof result.confidence === "number"
+    ? result.confidence
+    : (typeof result.aiConfidence === "number" ? result.aiConfidence : 100);
+  if (c > 0 && c <= 1) c = Math.round(c * 100);
+  c = Math.min(100, Math.max(0, Math.round(c)));
+  const rawSignals = Array.isArray(result.signals) ? result.signals : [];
+  const reasonSignals = Array.isArray(result.reasons) ? result.reasons : [];
+  const normalized = [...rawSignals, ...reasonSignals].map((s) =>
+    typeof s === "string" ? { type: "signal", label: s } : s
+  );
+  if (globalThis.resolveStatus(score, normalized, c) === "uncertain") result.status = "uncertain";
 }
 
 async function applyAdvancedScoring(result, normalizedUrl, tabId) {
@@ -1156,6 +1476,8 @@ async function applyAdvancedScoring(result, normalizedUrl, tabId) {
   if (out.status === "safe" && finalRiskScore >= 75) out.status = "malicious";
   else if (out.status === "safe" && finalRiskScore >= 45) out.status = "suspicious";
 
+  softenSuspiciousWithResolveStatus(out);
+
   return out;
 }
 
@@ -1180,12 +1502,13 @@ async function saveThreatHistory(url, result) {
       url: String(url || ""),
       domain: (() => { try { return new URL(url).hostname; } catch { return url; } })(),
       status: String(result.status || "safe"),
-      score: Number(result.score || 0),
-      finalRiskScore: Number(result.finalRiskScore || 0),
+      score: clampScore(result.score || 0),
+      finalRiskScore: clampScore(result.finalRiskScore || result.score || 0),
       trustScore: Number(result.trustScore || 100),
       confidence: Number(result.confidence || 0),
       aiReasoning: result.aiReasoning || null,
-      aiScore: result.aiScore || null,
+      aiScore: typeof result.aiScore === "number" ? clampScore(result.aiScore) : null,
+      aiDecision: result.aiDecision || "unknown",
       explanation: String(result.explanation || ""),
       topReasons: Array.isArray(result.topReasons) ? result.topReasons.slice(0, 3) : [],
       behaviorRiskScore: Number(result.behaviorRiskScore || 0),
@@ -1234,83 +1557,449 @@ async function saveThreatHistory(url, result) {
  * @param {object} result
  */
 function redirectToWarningPage(tabId, blockedUrl, result) {
-  const warningBase = chrome.runtime.getURL("warning.html");
+  (async () => {
+    const redirectUrl = buildWarningURL(result, blockedUrl);
+    const warningUrlObj = new URL(redirectUrl);
+    const warningParams = warningUrlObj.searchParams;
+    let domain = "";
+    try { domain = new URL(blockedUrl).hostname; } catch {}
 
-  // Safely encode each param with length limits
-  const safeEncode = (val, maxLen = 400) =>
-    encodeURIComponent(String(val || "").substring(0, maxLen));
+    // At the top of the block/redirect handler:
+    const soundKey = `sx_sound_played_${domain}`;
+    const alreadyPlayed = await chrome.storage.session.get(soundKey);
 
-  const reasonStr = Array.isArray(result.reasons)
-    ? result.reasons.join("; ").substring(0, 800)
-    : String(result.reason || "").substring(0, 800);
-
-  const signalsJson = JSON.stringify(
-    Array.isArray(result.signals) ? result.signals.slice(0, 10) : []
-  );
-
-  const sourcesJson = JSON.stringify(
-    Array.isArray(result.sources) ? result.sources.slice(0, 6) : []
-  );
-
-  const breakdownJson = JSON.stringify(
-    result && typeof result.breakdown === "object" && result.breakdown
-      ? result.breakdown
-      : {}
-  );
-
-  // Core detection params
-  const params = [
-    `url=${safeEncode(blockedUrl, 500)}`,
-    `attackType=${safeEncode(result.attackType)}`,
-    `confidence=${safeEncode(result.confidence)}`,
-    `trustScore=${safeEncode(result.trustScore)}`,
-    `score=${safeEncode(result.score)}`,
-    `finalRiskScore=${safeEncode(result.finalRiskScore)}`,
-    `explanation=${safeEncode(result.explanation || "", 500)}`,
-    `aiReasoning=${safeEncode(result.aiReasoning || "", 400)}`,
-    `domainAgeDays=${safeEncode(result.domainAgeDays)}`,
-    `serverLocation=${safeEncode(result.serverLocation || "")}`,
-    `reason=${safeEncode(reasonStr, 800)}`,
-    `signals=${safeEncode(signalsJson, 400)}`,
-    `sources=${safeEncode(sourcesJson, 400)}`,
-    `breakdown=${safeEncode(breakdownJson, 600)}`,
-    `source=sw`,
-  ];
-
-  // Adaptive metadata â€” present only when adaptive engine has run.
-  // Allows warning.js to display reputation/behavior context without
-  // an extra storage round-trip.
-  if (result.finalScore !== undefined) {
-    params.push(`finalScore=${safeEncode(Number(result.finalScore).toFixed(2))}`);
-  }
-  if (result.reputationWeight !== undefined && result.reputationWeight > 0) {
-    params.push(`repWeight=${safeEncode(Number(result.reputationWeight).toFixed(2))}`);
-  }
-  if (result.userTrusted) {
-    params.push(`userTrusted=1`);
-  }
-  if (result.autoEscalated) {
-    params.push(`autoEscalated=1`);
-  }
-  if (result.adaptiveAppliedRule) {
-    params.push(`adaptiveRule=${safeEncode(result.adaptiveAppliedRule)}`);
-  }
-  if (result.sensitivityLevel) {
-    params.push(`sensitivity=${safeEncode(result.sensitivityLevel)}`);
-  }
-  if (result.reputationSnapshot) {
-    params.push(`repSnap=${safeEncode(JSON.stringify(result.reputationSnapshot), 200)}`);
-  }
-
-  const redirectUrl = `${warningBase}?${params.join("&")}`;
-
-  chrome.tabs.update(tabId, { url: redirectUrl }, () => {
-    if (chrome.runtime.lastError) {
-      console.error("[Sentinel] Tab update failed:", chrome.runtime.lastError.message);
+    if (!alreadyPlayed[soundKey]) {
+      // Mark as played for this session
+      await chrome.storage.session.set({ [soundKey]: true });
+      // Pass sound=1 in the warning URL so warning.js knows to play
+      warningParams.set('sound', '1');
     } else {
-      console.log("[Sentinel] â›” Warning page shown for:", blockedUrl);
+      // Already played for this domain this session — suppress
+      warningParams.set('sound', '0');
+    }
+
+    chrome.tabs.update(tabId, { url: warningUrlObj.toString() }, () => {
+      if (chrome.runtime.lastError) {
+        console.error("[Sentinel] Tab update failed:", chrome.runtime.lastError.message);
+      } else {
+        console.log("[Sentinel] â›” Warning page shown for:", blockedUrl);
+      }
+    });
+  })().catch((e) => {
+    console.warn("[Sentinel] warning redirect sound throttle failed:", e?.message);
+    const redirectUrl = buildWarningURL(result, blockedUrl);
+    chrome.tabs.update(tabId, { url: redirectUrl }, () => void chrome.runtime.lastError);
+  });
+}
+
+function buildWarningURL(result, originalURL) {
+  const base = chrome.runtime.getURL("warning.html");
+  let domain = "";
+  try { domain = new URL(originalURL).hostname; } catch {}
+
+  const signalStrings = (result?.signals || [])
+    .filter((s) => {
+      if (s && typeof s === "object") return s.type !== "trust" && (s.value || s.reason);
+      return true;
+    })
+    .map((s) => String((s && typeof s === "object") ? (s.value || s.reason || s.type || "") : s))
+    .filter(Boolean)
+    .slice(0, 5);
+
+  const params = new URLSearchParams({
+    url: originalURL,
+    score: String(result?.score ?? 0),
+    status: result?.status ?? "malicious",
+    confidence: String(result?.confidence ?? 0),
+    domain,
+    signals: signalStrings.join("|"),
+    categories: (result?.signals || [])
+      .filter((s) => s && typeof s === "object" && s.type === "category")
+      .map((s) => s.value)
+      .slice(0, 4)
+      .join("|"),
+    reasoning: (result?.reasons || []).slice(0, 2).join(" "),
+  });
+  return `${base}?${params.toString()}`;
+}
+
+function redirectToBlock(tabId, url, result) {
+  if (!tabId) return;
+  const warningUrl = buildWarningURL(result, url);
+  chrome.tabs.get(tabId, (tab) => {
+    if (chrome.runtime.lastError || !tab) {
+      console.error("[SX] redirect failed:", chrome.runtime.lastError?.message || "tab missing");
+      return;
+    }
+    chrome.tabs.update(tabId, { url: warningUrl }, () => {
+      if (chrome.runtime.lastError) {
+        console.error("[SX] redirect failed:", chrome.runtime.lastError.message);
+      }
+    });
+  });
+}
+
+function computeTrustLevel(result) {
+  const score = result.score || 0;
+  if (score >= 60) return "LOW";
+  if (score >= 30) return "MEDIUM";
+  return "HIGH";
+}
+
+function sendOverlayToTab(tabId, result, attempt = 0) {
+  chrome.tabs.sendMessage(tabId, { type: "SENTINEL_SHOW_OVERLAY", data: result }, (resp) => {
+    if (!chrome.runtime.lastError && resp && resp.ok) return;
+    if (attempt < 4) {
+      const delay = [500, 1000, 2000, 3000][attempt];
+      setTimeout(() => sendOverlayToTab(tabId, result, attempt + 1), delay);
     }
   });
+}
+
+function finalizeAndRoute(tabId, rawUrl, result, startTime) {
+  result.scanMs = Date.now() - startTime;
+  result.url = rawUrl;
+  result.domain = result.domain || (() => {
+    try { return new URL(rawUrl).hostname; } catch { return ""; }
+  })();
+  result.score = Math.max(0, Math.min(100, Math.round(result.score || 0)));
+  result.trustLevel = computeTrustLevel(result);
+
+  // Ensure async enrichment is applied in-order before routing.
+  applySensitivityAdjustments(result, () => {
+    applyFalsePositiveAdjustment(result, () => {
+      applyManagedPolicies(result, tabId, rawUrl);
+    });
+  });
+}
+
+// FIX 6D: Adjust detection thresholds based on sensitivity setting
+function applySensitivityAdjustments(result, done) {
+  chrome.storage.local.get("sentinel_sensitivity", (data) => {
+    const sensitivity = data.sentinel_sensitivity || "medium"; // default: medium
+    try {
+      const engine = globalThis.SentinelDetectionEngine;
+      if (engine && typeof engine.setSensitivityMode === "function") {
+        engine.setSensitivityMode(sensitivity);
+      }
+    } catch {}
+    
+    // Adjust suspicious/malicious thresholds based on sensitivity
+    if (sensitivity === "high") {
+      // High sensitivity: lower thresholds, more alerts
+      // score >= 15 → suspicious, score >= 80 → malicious (unchanged)
+      if (result.score >= 15 && result.score < 30) {
+        result.status = "suspicious";
+      }
+      result.confidenceThreshold = 0.80;
+    } else if (sensitivity === "low") {
+      // Low sensitivity: higher thresholds, fewer alerts
+      // score >= 50 → suspicious, score >= 80 → malicious
+      if (result.score >= 50 && result.score < 80) {
+        result.status = "suspicious";
+      } else if (result.score < 50) {
+        result.status = "safe";
+      }
+      result.confidenceThreshold = 0.50;
+    } else {
+      // Medium sensitivity (default): current thresholds
+      // score >= 30 → suspicious, score >= 80 → malicious
+      result.confidenceThreshold = 0.65;
+    }
+    
+    result.sensitivityMode = sensitivity;
+    if (typeof done === "function") done();
+  });
+}
+
+function applyFalsePositiveAdjustment(result, done) {
+  const domain = String(result.domain || "").toLowerCase();
+  if (!domain) {
+    if (typeof done === "function") done();
+    return;
+  }
+  const key = "fp_reports_" + domain;
+  chrome.storage.local.get(key, (data) => {
+    const count = Number(data[key] || 0);
+    if (count >= 3) {
+      result.score = Math.max(0, Number(result.score || 0) - 20);
+      if (result.status === "malicious" && result.score < 80) {
+        result.status = "suspicious";
+      } else if (result.status === "suspicious" && result.score < 30) {
+        result.status = "safe";
+      }
+      result.falsePositiveAdjustment = true;
+      result.reason = [result.reason, "Score reduced by trusted-user false-positive feedback"]
+        .filter(Boolean)
+        .join("; ");
+    }
+    if (typeof done === "function") done();
+  });
+}
+
+// FIX 6A: Check and apply managed storage policies for allowlist/blocklist
+function applyManagedPolicies(result, tabId, rawUrl) {
+  const domain = result.domain || "";
+  if (!domain) {
+    finalizeAndRouteAfterPolicies(tabId, rawUrl, result);
+    return;
+  }
+  
+  chrome.storage.managed.get(["sentinel_allowlist", "sentinel_blocklist"], (policies) => {
+    const allowlist = Array.isArray(policies?.sentinel_allowlist) ? policies.sentinel_allowlist : [];
+    const blocklist = Array.isArray(policies?.sentinel_blocklist) ? policies.sentinel_blocklist : [];
+    
+    const matchesPolicy = (entry) => domain === entry || domain.endsWith("." + entry);
+
+    if (blocklist.some(matchesPolicy)) {
+      result.status = "malicious";
+      result.score = 100;
+      result.reason = "Blocked by IT policy";
+      result.appliedRule = "MANAGED_BLOCKLIST";
+      result.managedByOrganization = true;
+    } else if (allowlist.some(matchesPolicy)) {
+      result.status = "safe";
+      result.score = 0;
+      result.reason = "Allowed by IT policy";
+      result.appliedRule = "MANAGED_ALLOWLIST";
+      result.managedByOrganization = true;
+    }
+    
+    if (policies?.sentinel_allowlist || policies?.sentinel_blocklist) {
+      result.policyBadge = "Managed by your organisation";
+    }
+    
+    finalizeAndRouteAfterPolicies(tabId, rawUrl, result);
+  });
+}
+
+// Continue with routing after policies are applied
+function finalizeAndRouteAfterPolicies(tabId, rawUrl, result) {
+  const wasForceDeepRescan = pendingRescanForceDeep.get(tabId) === true;
+  if (wasForceDeepRescan) pendingRescanForceDeep.delete(tabId);
+
+  softenSuspiciousWithResolveStatus(result);
+  let canonical = globalThis.normalizeSentinelResult({
+    ...result,
+    url: rawUrl,
+    timestamp: Date.now()
+  });
+  if (wasForceDeepRescan && canonical.confidence < 25) {
+    canonical = { ...canonical, sxExtendedRescanLowConfidence: true };
+  }
+
+  storeTabAnalysis(tabId, canonical);
+  chrome.storage.local.set({ "sentinel_last_report": canonical });
+
+  if (canonical.status === "malicious") {
+    sendOverlayToTab(tabId, canonical);
+    setTimeout(() => {
+      chrome.tabs.get(tabId, (tab) => {
+        if (chrome.runtime.lastError || !tab) return;
+        const warnUrl = buildWarningURL(canonical, rawUrl);
+        chrome.tabs.update(tabId, { url: warnUrl });
+      });
+    }, 3000);
+    return;
+  }
+
+  sendOverlayToTab(tabId, canonical);
+}
+
+function runFullAnalysis(tabId, rawUrl, hostname, options = {}) {
+  const domain = String(hostname || (() => {
+    try { return new URL(rawUrl).hostname; } catch { return ""; }
+  })()).toLowerCase();
+  const now = Date.now();
+
+  chrome.storage.local.get(["sentinel_bypasses", "sentinel_user_trust"], (res) => {
+    const bypasses = res?.sentinel_bypasses || {};
+    const userTrust = res?.sentinel_user_trust || {};
+    const bypass = domain ? bypasses[domain] : null;
+    const isBypassed = Boolean(bypass && bypass.expiresAt > now);
+    const isUserTrusted = Boolean(domain && userTrust[domain]);
+
+    if ((isBypassed || isUserTrusted) && !options.forceDeep) {
+      pendingRescanForceDeep.delete(tabId);
+      const safeResult = globalThis.normalizeSentinelResult({
+        status: "safe",
+        score: 0,
+        confidence: 80,
+        reasons: [
+          isUserTrusted
+            ? "You have marked this domain as safe."
+            : "You chose to proceed past the security warning (bypass active for 30 minutes)."
+        ],
+        signals: ["user_override"],
+        url: rawUrl,
+        domain,
+        timestamp: now
+      });
+      storeTabAnalysis(tabId, safeResult);
+      chrome.storage.local.set({ "sentinel_last_report": safeResult });
+      sendOverlayToTab(tabId, safeResult);
+      return;
+    }
+
+    runFullAnalysisCore(tabId, rawUrl, hostname, options);
+  });
+}
+
+/**
+ * Re-run analysis for a tab (used by SENTINEL_RESCAN). Clears URL/tab caches
+ * and optional legacy storage keys. When forceDeep is true, skips user
+ * bypass / trust short-circuits so the engine runs a full scan.
+ */
+async function analyzeTab(tabId, url, options = {}) {
+  if (!tabId || !url) return;
+  let hostname = "";
+  try {
+    hostname = new URL(url).hostname.toLowerCase();
+  } catch {
+    throw new Error("invalid url");
+  }
+  const normUrl = normalizeCacheKey(url);
+  if (!options.forceDeep) {
+    try {
+      const cachedData = await storageGet([`sentinel_result_${url}`, `sentinel_result_${normUrl}`]);
+      const cached = cachedData[`sentinel_result_${url}`] || cachedData[`sentinel_result_${normUrl}`];
+      if (cached && cached.cachedAt) {
+        const age = Date.now() - cached.cachedAt;
+        const ttl = cached.ttl || (5 * 60 * 1000); // default 5 min
+        if (age < ttl) {
+          const canonicalCached = globalThis.normalizeSentinelResult
+            ? globalThis.normalizeSentinelResult({ ...cached, url, timestamp: Date.now() })
+            : cached;
+          storeTabAnalysis(tabId, canonicalCached);
+          sendOverlayToTab(tabId, canonicalCached);
+          return canonicalCached;
+        }
+      }
+    } catch (_) {}
+  }
+  try {
+    await chrome.storage.local.remove([
+      `sentinel_result_${url}`,
+      `sentinel_cache_${url}`,
+      `sentinel_result_${normUrl}`,
+      `sentinel_cache_${normUrl}`,
+      `sx_result_${tabId}`,
+    ]);
+  } catch (_) {}
+  try {
+    urlCache.delete(normUrl);
+  } catch (_) {}
+  clearTabAnalysis(tabId);
+  if (options.forceDeep) pendingRescanForceDeep.set(tabId, true);
+  runFullAnalysis(tabId, url, hostname, options);
+}
+
+function runFullAnalysisCore(tabId, rawUrl, hostname, options = {}) {
+  const startTime = Date.now();
+  let result = null;
+
+  try {
+    const engine = globalThis.SentinelDetectionEngine;
+    if (!engine || typeof engine.analyzeUrl !== "function") {
+      console.error("[SX] DetectionEngine not available");
+      pendingRescanForceDeep.delete(tabId);
+      return;
+    }
+    result = engine.analyzeUrl(rawUrl, { forceDeep: Boolean(options && options.forceDeep) });
+    // Cache high-reputation safe results for longer (24h) to avoid
+    // unnecessary rescans that can surface transient uncertain states.
+    if (
+      typeof globalThis.isHighReputationDomain === "function" &&
+      globalThis.isHighReputationDomain(rawUrl) &&
+      result &&
+      result.status === "safe"
+    ) {
+      const cacheKey = `sentinel_result_${rawUrl}`;
+      storageSet({
+        [cacheKey]: {
+          ...result,
+          cachedAt: Date.now(),
+          ttl: 24 * 60 * 60 * 1000 // 24 hours
+        }
+      }).catch(() => {});
+    }
+  } catch (err) {
+    console.error("[SX] analyzeUrl threw:", err);
+    pendingRescanForceDeep.delete(tabId);
+    return;
+  }
+
+  if (!result) {
+    pendingRescanForceDeep.delete(tabId);
+    return;
+  }
+
+  const continueWithResult = (finalResult) => {
+    if (globalThis.SentinelAdaptiveEngine &&
+        typeof globalThis.SentinelAdaptiveEngine.applyAdaptiveScoring === "function") {
+      try {
+        globalThis.SentinelAdaptiveEngine.applyAdaptiveScoring(finalResult, hostname)
+          .then((adaptedResult) => {
+            if (adaptedResult) finalResult = adaptedResult;
+            finalizeAndRoute(tabId, rawUrl, finalResult, startTime);
+          })
+          .catch(() => { finalizeAndRoute(tabId, rawUrl, finalResult, startTime); });
+      } catch {
+        finalizeAndRoute(tabId, rawUrl, finalResult, startTime);
+      }
+    } else {
+      finalizeAndRoute(tabId, rawUrl, finalResult, startTime);
+    }
+  };
+
+  enrichScanWithPageContext(tabId, rawUrl, result)
+    .then((enriched) => continueWithResult(enriched || result))
+    .catch(() => continueWithResult(result));
+}
+
+async function enrichScanWithPageContext(tabId, url, existingResult) {
+  try {
+    const pageData = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => ({
+        title: document.title,
+        hasSSL: location.protocol === "https:",
+        hasCanonical: !!document.querySelector('link[rel="canonical"]'),
+        hasStructuredData: !!document.querySelector('script[type="application/ld+json"]'),
+        metaDescription: document.querySelector('meta[name="description"]')?.content || "",
+        hasContactPage: !!document.querySelector('a[href*="contact"]'),
+        hasPolicyPage: !!document.querySelector('a[href*="privacy"], a[href*="terms"]'),
+        knownPaymentRefs: ["razorpay", "payu", "ccavenue", "stripe", "paypal"]
+          .filter(p => document.body.innerHTML.toLowerCase().includes(p)),
+        hasProductSchema: document.body.innerHTML.includes('"Product"') ||
+                          document.body.innerHTML.includes('"ItemList"'),
+        hasReviewSchema: document.body.innerHTML.includes('"Review"') ||
+                         document.body.innerHTML.includes('"AggregateRating"'),
+      })
+    });
+
+    const ctx = pageData?.[0]?.result;
+    if (!ctx) return existingResult;
+
+    let confidenceBoost = 0;
+    let scoreReduction = 0;
+    if (ctx.hasSSL) confidenceBoost += 10;
+    if (ctx.hasCanonical) confidenceBoost += 5;
+    if (ctx.hasStructuredData) confidenceBoost += 8;
+    if (ctx.hasPolicyPage) { confidenceBoost += 7; scoreReduction += 5; }
+    if (ctx.hasContactPage) { confidenceBoost += 5; scoreReduction += 3; }
+    if (ctx.knownPaymentRefs.length > 0) { confidenceBoost += 10; scoreReduction += 8; }
+    if (ctx.hasProductSchema) { confidenceBoost += 8; scoreReduction += 5; }
+    if (ctx.hasReviewSchema) { confidenceBoost += 5; scoreReduction += 3; }
+
+    existingResult.confidence = Math.min(99, Number(existingResult.confidence || 0) + confidenceBoost);
+    existingResult.score = Math.max(0, Number(existingResult.score || 0) - scoreReduction);
+    existingResult._enrichedWithPageContext = true;
+    existingResult._pageSignals = ctx;
+    return existingResult;
+  } catch (_) {
+    return existingResult; // Fail gracefully
+  }
 }
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
@@ -1334,6 +2023,8 @@ function redirectToWarningPage(tabId, blockedUrl, result) {
  *   domains synchronously BEFORE this handler runs, covering the race.
  */
 chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
+  // Legacy pipeline disabled in favor of canonical runFullAnalysis flow.
+  return;
   // â”€â”€ Guard 1: Main frame only â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (details.frameId !== 0) return;
 
@@ -1369,7 +2060,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     TAB_BEHAVIOR_RISK.set(tabId, Math.min(100, prevRisk + 15));
   }
 
-  console.log("[Sentinel] â–¶ Analyzing:", normalizedUrl);
+  console.log("[Sentinel] Analysis triggered:", { tabId, url: normalizedUrl }); // CHANGED: observability
 
   // ðŸ§  DEBUG: Log analysis start
   const analysisStartTime = Date.now();
@@ -1381,9 +2072,44 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
     return;
   }
 
+  // CHANGED: Hard block check (inline + maliciousDomains.js)
+  let hardHost = '';
+  try { hardHost = new URL(normalizedUrl).hostname.toLowerCase(); } catch {}
+  if (isHardBlocked(hardHost)) {
+    console.log('[Sentinel] 🚫 HARD BLOCKED:', hardHost); // CHANGED: observability
+    const blockedResult = {
+      score: 100,
+      status: 'malicious',
+      verdict: 'CRITICAL',
+      domain: hardHost,
+      url: normalizedUrl,
+      signals: [{ label: 'Known malicious domain', weight: 100 }],
+      reasons: ['Domain is in known malicious blocklist'],
+      trustLevel: 'MALICIOUS',
+      confidence: 99,
+      source: 'blocklist'
+    };
+    const canonical = globalThis.normalizeSentinelResult({ ...blockedResult, url: rawUrl, timestamp: Date.now() });
+    storeTabAnalysis(tabId, canonical);
+    chrome.storage.local.set({ "sentinel_last_report": canonical });
+    notifyContentScript(tabId, canonical, 1);
+    redirectToWarningPage(tabId, rawUrl, blockedResult);
+    saveThreatHistory(rawUrl, blockedResult).catch(() => {});
+    return;
+  }
+
   // â”€â”€ Step 4: LRU Cache check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   const cached = urlCache.get(normalizedUrl);
   if (cached) {
+    const canonical = globalThis.normalizeSentinelResult({ ...cached, url: rawUrl, timestamp: Date.now() });
+    storeTabAnalysis(tabId, canonical);
+    chrome.storage.local.set({ "sentinel_last_report": canonical });
+    // CHANGED: Notify content script (retry) so overlay can appear without clicks
+    notifyContentScript(tabId, canonical, 1);
+    if (canonical.score >= 100) {
+      autoBlockTab(tabId, canonical.domain);
+      return;
+    }
     console.log("[Sentinel] âš¡ Cache hit:", normalizedUrl, "â†’", cached.status);
     // Still act on cached malicious result â€” user may be revisiting a bad URL
     if (cached.status === "malicious") {
@@ -1401,8 +2127,11 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
       return;
     }
     result = engine.analyzeUrl(normalizedUrl);
+    result.aiScore = null;
+    result.aiDecision = "unknown";
+    result.aiReasoning = "";
 
-    // ðŸ§  AI LAYER
+    // AI layer: fail-open. If unavailable, keep aiScore null and do not change verdict.
     const aiResult = await callAIAnalysis({
       url: normalizedUrl,
       signals: result.signals || [],
@@ -1411,14 +2140,16 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
       reasons: result.reasons || []
     });
 
-    if (aiResult) {
-      result.aiReasoning = aiResult.reasoning;
-      result.aiScore = aiResult.riskScore;
+    if (aiResult && typeof aiResult.confidence === "number") {
+      result.aiScore = clampScore(aiResult.confidence);
+      result.aiConfidence = result.aiScore;
+      result.aiDecision = aiResult.decision ?? "unknown";
+      result.aiReasoning = aiResult.reasoning ?? "";
 
       // Optional override logic
-      if (aiResult.decision === "malicious") {
+      if (result.aiDecision === "malicious") {
         result.status = "malicious";
-      } else if (aiResult.decision === "suspicious" && result.status === "safe") {
+      } else if (result.aiDecision === "suspicious" && result.status === "safe") {
         result.status = "suspicious";
       }
     }
@@ -1554,32 +2285,35 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   
   // Refresh cache so downstream overlay path sees enriched context.
   urlCache.set(normalizedUrl, result);
+  softenSuspiciousWithResolveStatus(result);
+  const canonical = globalThis.normalizeSentinelResult({ ...result, url: rawUrl, timestamp: Date.now() });
+  storeTabAnalysis(tabId, canonical);
+  chrome.storage.local.set({ "sentinel_last_report": canonical });
+  
+  // CHANGED: Notify content.js with retry logic after storing analysis
+  notifyContentScript(tabId, canonical, 1);
+
+  if (canonical.score >= 100) {
+    autoBlockTab(tabId, canonical.domain);
+  }
 
   // â”€â”€ Step 8: Route based on FINAL verdict â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   if (result.status === "malicious") {
-    // ðŸŽ¯ MALICIOUS PATH: Even high-confidence verdicts benefit from gating
-    // Malicious detections skip some gating (already high confidence) but
-    // still check cooldown to prevent spam on the same/similar URLs
-    if (!isCooldownActive()) {
-      ALERT_COOLDOWN.lastAlertTime = Date.now();
-      console.log("[Sentinel] ðŸš« BLOCKING:", normalizedUrl);
-      redirectToWarningPage(tabId, rawUrl, result);
-      saveThreatHistory(rawUrl, result).catch(e => console.warn("[Sentinel] History save error:", e));
+    // CHANGED: MALICIOUS must never be suppressed by cooldown
+    console.log("[Sentinel] ðŸš« BLOCKING:", normalizedUrl);
+    redirectToWarningPage(tabId, rawUrl, result);
+    saveThreatHistory(rawUrl, result).catch(e => console.warn("[Sentinel] History save error:", e));
 
-      // Update v3.0 reputation (non-blocking)
-      if (adaptiveEngine && hostname) {
-        adaptiveEngine.updateDomainReputationV3(hostname, "malicious").catch(() => {});
-        adaptiveEngine.updateUserProfile(hostname, "blocked").catch(() => {});
-      }
-    } else {
-      console.log("[Sentinel] â± Malicious alert suppressed: cooldown active");
-      saveThreatHistory(rawUrl, result).catch(e => console.warn("[Sentinel] History save error:", e));
+    // Update v3.0 reputation (non-blocking)
+    if (adaptiveEngine && hostname) {
+      adaptiveEngine.updateDomainReputationV3(hostname, "malicious").catch(() => {});
+      adaptiveEngine.updateUserProfile(hostname, "blocked").catch(() => {});
     }
 
   } else if (result.status === "suspicious") {
     // âœ¨ NEW: Apply adaptive alert gating (v3.1)
     // Combines: risk scoring, signal correlation, trust awareness, cooldown
-    const adaptiveDecision = shouldShowAlert(result);
+    const adaptiveDecision = shouldShowAlert(result, tabId);
     
     if (!adaptiveDecision) {
       console.log("[Sentinel] âœ… ADAPTIVE GATING SUPPRESSED:", normalizedUrl);
@@ -1601,6 +2335,11 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
       return;
     }
 
+    // CHANGED: per-tab cooldown keyed to this alert type + band
+    const cdHost = String(result.domain || hostname || "").toLowerCase();
+    const cdRoot = cdHost ? getRootDomain(cdHost) : "";
+    const cdRisk = Number(result.finalRiskScore ?? result.score ?? 0);
+    setCooldown(tabId, `suspicious:${cdRoot}:${Math.floor(cdRisk / 10)}`);
     console.log("[Sentinel] âš ï¸ Suspicious (Adaptive Alert Approved):", normalizedUrl);
     // NOTE: The overlay is delivered by webNavigation.onCompleted belowâ€”
     // after the page and content script are fully ready at document_idle.
@@ -1622,243 +2361,329 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
   }
 });
 
+chrome.webNavigation.onBeforeNavigate.addListener((details) => {
+  if (details.frameId !== 0) return;
+  const tabId = details.tabId;
+  const rawUrl = details.url;
+  if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) return;
+
+  let hostname = "";
+  try { hostname = new URL(rawUrl).hostname.toLowerCase(); } catch { return; }
+
+  // Hard blocklist — instant block, no analysis needed
+  if (typeof isHardBlocked === "function" && isHardBlocked(hostname)) {
+    const result = {
+      score: 100, status: "malicious", domain: hostname, url: rawUrl,
+      reasons: ["Domain is on the SentinelX hard blocklist"],
+      signals: [{ name: "hard_blocklist", weight: 100,
+        description: "Exact match in known-malicious domain database" }],
+      trustLevel: "LOW", aiConfidence: 99
+    };
+    storeTabAnalysis(tabId, result);
+    redirectToBlock(tabId, rawUrl, result);
+    return;
+  }
+
+  // Trusted domain — skip full analysis, mark safe
+  if (typeof globalThis.isTrustedDomain === "function" && globalThis.isTrustedDomain(hostname)) {
+    const result = {
+      score: 5, status: "safe", domain: hostname, url: rawUrl,
+      reasons: ["Domain is on SentinelX trusted whitelist"],
+      signals: [], trustLevel: "HIGH", aiConfidence: 98, scanMs: 0
+    };
+    storeTabAnalysis(tabId, result);
+    return;
+  }
+
+  // Bypass check
+  if (typeof isBypassed === "function") {
+    isBypassed(rawUrl).then((bypassed) => {
+      if (bypassed) return;
+      runFullAnalysis(tabId, rawUrl, hostname);
+    }).catch(() => {
+      runFullAnalysis(tabId, rawUrl, hostname);
+    });
+  } else {
+    runFullAnalysis(tabId, rawUrl, hostname);
+  }
+});
+
+// CHANGED: SPA navigation support (React/Vue/Angular) — re-analyze on history updates
+chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
+  try {
+    if (!details || details.frameId !== 0) return;
+    if (!details.tabId || !details.url) return;
+    if (!/^https?:\/\//i.test(details.url)) return;
+    const extensionOrigin = chrome.runtime.getURL("");
+    if (details.url.startsWith(extensionOrigin)) return;
+    // CHANGED: Fire a non-blocking re-analysis; rely on internal dedupe
+    runFullAnalysis(
+      details.tabId,
+      details.url,
+      (() => { try { return new URL(details.url).hostname; } catch { return ""; } })()
+    );
+  } catch (e) {
+    // fail-open
+  }
+});
+
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 // SECTION 10b â€” LEGACY REPUTATION (DEPRECATED â€” v3.0 uses adaptiveEngine)
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+async function analyzeTabUrl(tabId, url, options = {}) {
+  runFullAnalysis(
+    tabId,
+    url,
+    (() => { try { return new URL(url).hostname; } catch { return ""; } })()
+  );
+  return null;
+
+  if (!Number.isInteger(tabId) || !isAnalyzableTabUrl(url)) return null;
+
+  const rawUrl = url;
+  const normalizedUrl = normalizeCacheKey(rawUrl);
+  const startTime = Date.now();
+
+  if (!options.force && isDuplicate(tabId, normalizedUrl)) {
+    return tabAnalysisMap.get(tabId) || null;
+  }
+
+  try {
+    const bypassed = await isBypassed(normalizedUrl);
+    if (bypassed) return null;
+
+    let result = urlCache.get(normalizedUrl);
+    if (!result) {
+      const engine = globalThis.SentinelDetectionEngine;
+      if (!engine || typeof engine.analyzeUrl !== "function") {
+        console.error("[SentinelX] Detection engine unavailable");
+        return null;
+      }
+
+      result = engine.analyzeUrl(normalizedUrl);
+      result.aiScore = null;
+      result.aiDecision = "unknown";
+      result.aiReasoning = "";
+
+      const aiResult = await callAIAnalysis({
+        url: normalizedUrl,
+        signals: result.signals || [],
+        score: result.score,
+        confidence: result.confidence,
+        reasons: result.reasons || []
+      });
+
+      if (aiResult && typeof aiResult.confidence === "number") {
+        result.aiScore = clampScore(aiResult.confidence);
+        result.aiConfidence = result.aiScore;
+        result.aiDecision = aiResult.decision ?? "unknown";
+        result.aiReasoning = aiResult.reasoning ?? "";
+        if (result.aiDecision === "malicious") {
+          result.status = "malicious";
+        } else if (result.aiDecision === "suspicious" && result.status === "safe") {
+          result.status = "suspicious";
+        }
+      }
+
+      try {
+        const sslSignals = consumeSSLSignals(normalizedUrl, tabId);
+        if (sslSignals.length > 0) {
+          result.signals = [...new Set([...(result.signals || []), ...sslSignals])];
+          const criticalSSL = ["invalid_ssl", "expired_cert", "domain_mismatch"];
+          if (sslSignals.some(s => criticalSSL.includes(s)) && result.status === "safe") {
+            result.status = "suspicious";
+          }
+        }
+      } catch (sslErr) {
+        console.warn("[SentinelX] SSL analysis failed:", sslErr?.message);
+      }
+
+      let hostname = "";
+      try { hostname = new URL(normalizedUrl).hostname; } catch {}
+      const adaptiveEngine = globalThis.SentinelAdaptiveEngine;
+      if (adaptiveEngine && hostname) {
+        try {
+          result = await adaptiveEngine.applyAdaptiveScoring(result, hostname);
+        } catch (adaptiveErr) {
+          console.warn("[SentinelX] Adaptive scoring failed:", adaptiveErr?.message);
+        }
+      }
+
+      result = await applyAdvancedScoring(result, normalizedUrl, tabId);
+      urlCache.set(normalizedUrl, result);
+    }
+
+    const canonical = globalThis.normalizeSentinelResult({ ...result, url: rawUrl, timestamp: Date.now() });
+    if (options.onDemand) canonical.onDemand = true;
+    storeTabAnalysis(tabId, canonical);
+    chrome.storage.local.set({ "sentinel_last_report": canonical });
+    // CHANGED: Notify content script (retry) so overlay can appear without clicks
+    notifyContentScript(tabId, canonical, 1);
+
+    if (canonical.score >= 100) {
+      chrome.tabs.update(tabId, {
+        url: buildWarningURL(canonical, rawUrl)
+      }, () => {
+        if (chrome.runtime.lastError) {
+          console.warn("[SentinelX] warning redirect failed:", chrome.runtime.lastError.message);
+        }
+      });
+      return canonical;
+    }
+    return canonical;
+  } catch (err) {
+    console.error("[SentinelX] analyzeTabUrl failed for", rawUrl, err);
+    return null;
+  }
+}
+
 // updateDomainReputation() wrote the old v2.1 schema { suspicious, malicious }.
 // v3.0 uses updateDomainReputationV3() from adaptiveEngine.js which writes the
 // correct { suspiciousHits, maliciousHits, bypassCount } schema with time-decay.
 // The old function is intentionally removed to prevent schema conflicts.
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// SECTION 10c â€” STATUS OVERLAY (webNavigation.onCompleted)
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+// CHANGED: Legacy onCompleted overlay delivery removed.
+// Overlay delivery on navigation is now via notifyContentScript() (ANALYSIS_COMPLETE)
+// and content.js self-fetch fallback.
 
-/**
- * Sends sentinel:show-overlay to content.js with automatic retry.
- *
- * WHY RETRY?
- *   Even at document_idle, on very fast connections Chrome can fire
- *   onCompleted before flushing the content script injection. Two retries
- *   with linear back-off cover this edge case without hammering the tab.
- *
- * WHY NOT IN onBeforeNavigate?
- *   onBeforeNavigate fires BEFORE the page loads. document_idle means the
- *   content script is ready AFTER. The message arrives before the listener
- *   is registered and is silently dropped. onCompleted fires after
- *   document_idle â€” content script is guaranteed to be listening.
- *
- * @param {number} tabId
- * @param {object} payload  â€” full message payload for content.js
- * @param {number} [retries=3]
- */
-/**
- * Per-tab accumulated behavior risk score (0â€“100, in-memory only).
- * Populated by BEHAVIOR_ALERT messages from behaviorMonitor.js.
- * Reset on each new navigation so scores never bleed across pages.
- */
-const TAB_BEHAVIOR_RISK = new Map();
-
-function sendOverlayWithRetry(tabId, payload, retries = 2) {
-  // Idempotent: if the first delivery succeeds (response received),
-  // cancel any pending retries so the overlay is shown exactly once.
-  let delivered = false;
-
-  function attempt(attemptsLeft) {
-    if (delivered) return;
-    chrome.tabs.sendMessage(tabId, payload, (response) => {
-      if (chrome.runtime.lastError) {
-        if (attemptsLeft > 0) {
-          // Linear back-off: 400ms, 800ms
-          setTimeout(() => attempt(attemptsLeft - 1), 400 * (retries - attemptsLeft + 1));
-        }
-      } else {
-        delivered = true;  // stop any further retries
+// CHANGED: Keep a minimal retry helper for legacy overlay senders (behavior alerts, etc.)
+function sendOverlayWithRetry(tabId, payload, attempt) {
+  attempt = attempt || 1;
+  chrome.tabs.sendMessage(tabId, payload, function() {
+    if (chrome.runtime.lastError) {
+      if (attempt < 4) {
+        var delay = attempt === 1 ? 300 : attempt === 2 ? 800 : 2000;
+        setTimeout(function() {
+          sendOverlayWithRetry(tabId, payload, attempt + 1);
+        }, delay);
       }
-    });
-  }
-
-  attempt(retries);
-}
-
-/**
- * Overlay delivery hub â€” fires AFTER the page is fully loaded.
- *
- * Pipeline:
- *   1. Guard: extension pages / non-http(s) / sub-frames   â†’ skip
- *   2. Cache lookup: onBeforeNavigate already ran analyzeUrl()  â†’ O(1) hit
- *   3. Show overlay for analyzed statuses (malicious/suspicious/safe)
- *   4. Suspicious â†’ additionally trigger sentinel:play-alert sound
- *
- * MESSAGE TYPE: "sentinel:show-overlay"
- *   This matches the listener in content.js exactly.
- *   The old "sentinel:suspicious-overlay" type in onBeforeNavigate was the
- *   root cause of the silent failure â€” nobody was listening for that type.
- */
-chrome.webNavigation.onCompleted.addListener((details) => {
-  // Guard 1: main frame only
-  if (details.frameId !== 0) return;
-
-  // Guard 2: extension pages (warning.html, dashboard.html, popup, etc.)
-  const extensionOrigin = chrome.runtime.getURL("");
-  if (details.url.startsWith(extensionOrigin)) return;
-
-  // Guard 3: http/https only â€” skip chrome://, file://, etc.
-  if (!/^https?:\/\//i.test(details.url)) return;
-
-  const tabId = details.tabId;
-  const url = details.url;
-  const normalizedUrl = normalizeCacheKey(url);
-  const result = urlCache.get(url) || urlCache.get(normalizedUrl);
-  if (!result) return;
-
-  // Show for all analyzed sites
-  const shouldShow =
-    result.status === "malicious" ||
-    result.status === "suspicious" ||
-    result.status === "safe";
-
-  if (!shouldShow) return;
-
-  console.log("[Overlay Trigger]", {
-    url,
-    status: result.status,
-    tabId
-  });
-
-  // â”€â”€ NEW: Apply centralized threat evaluator â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // This gates alert decisions through structured evaluation:
-  // - Weighted signal correlation
-  // - Confidence weighting
-  // - Trust-aware moderation
-  // - Hysteresis (anti-flicker)
-  // - Cooldown enforcement
-  const evaluator = globalThis.SentinelThreatEvaluator;
-  let threatDecision = null;
-
-  if (evaluator && typeof evaluator.evaluateThreat === "function") {
-    try {
-      threatDecision = evaluator.evaluateThreat(result, {
-        url: normalizedUrl,
-        trustTier: result.trustTier || "medium",
-        userProfile: result.userProfile,
-      });
-
-      // Log evaluation in dev_mode
-      if (_devModeEnabled && typeof evaluator.logEvaluation === "function") {
-        evaluator.logEvaluation(normalizedUrl, threatDecision);
-      }
-
-      // If evaluator says "no alert", respect it (cooldown or hysteresis)
-      if (!threatDecision.shouldAlert) {
-        console.log(
-          "[Sentinel] Alert suppressed by threat evaluator:",
-          threatDecision.cooldownRequired ? "cooldown" : "hysteresis/gating"
-        );
-        return;
-      }
-
-      // Use evaluator's severity and risk score
-      result.status = threatDecision.severity;
-      result.finalRiskScore = threatDecision.finalRisk;
-      result.evaluatorReasons = threatDecision.reasoning;
-    } catch (e) {
-      console.warn("[Sentinel] Threat evaluator error:", e);
-      // Fail-open: continue with base result if evaluator fails
     }
-  }
-
-  // â”€â”€ Step 2: build overlay payload â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const isSafe       = result.status === "safe";
-  const isSuspicious = result.status === "suspicious";
-  const isMalicious  = result.status === "malicious";
-
-  // Compute displayable risk score (prefer finalRiskScore, fall back to score*10)
-  const displayRisk = typeof result.finalRiskScore === "number"
-    ? result.finalRiskScore
-    : (typeof result.score === "number" ? Math.round(result.score * 10) : 0);
-
-  // â”€â”€ [Sentinel AI] Structured overlay decision log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  console.log("[Sentinel AI] Overlay decision", {
-    url,
-    status:    result.status,
-    risk:      displayRisk,
-    signals:   Array.isArray(result.signals) ? result.signals : [],
-    trustTier: result.trustTier || "medium",
-    mlScore:   result.mlRiskScore ?? null,
-    decision:  displayRisk >= 40 ? "SHOW" : (isMalicious ? "SHOW (malicious override)" : "SKIP (low risk)"),
-    evaluator: threatDecision ? { shouldAlert: threatDecision.shouldAlert, severity: threatDecision.severity } : null,
   });
-
-  // â”€â”€ Risk floor gate: skip overlay for genuinely low-risk pages â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  // Malicious always shows (redirected to warning.html above, but defence-in-depth).
-  // Suspicious/safe need risk >= 40 to justify IPC cost and user disruption.
-  if (!SENTINEL_FORCE_TEST_MODE && !isMalicious && displayRisk < 40) {
-    console.log("[Sentinel AI] Overlay skipped â€” risk below threshold", displayRisk, "/ 40");
-    return;
-  }
-
-  const overlayMessage = isSafe
-    ? "Site verified â€” no threats detected"
-    : `Caution: ${result.attackType
-        ? result.attackType.replace(/_/g, " ")
-        : "suspicious signals detected"}`;
-
-  // Combine reasoning from detection engine and threat evaluator
-  const finalReasons = [
-    ...(result.evaluatorReasons || []).slice(0, 2),
-    ...(Array.isArray(result.reasons) ? result.reasons.slice(0, 2) : []),
-  ].slice(0, 3);
-
-  const payload = {
-    type:         "sentinel:show-overlay",   // exact match for content.js listener
-    status:       result.status,
-    message:      overlayMessage,
-    trustScore:   typeof result.trustScore === "number" ? result.trustScore : null,
-    score:        typeof result.score === "number" ? result.score : null,
-    finalScore:   typeof result.finalRiskScore === "number" ? result.finalRiskScore : null,
-    signals:      Array.isArray(result.signals) ? result.signals.slice(0, 12) : [],
-    apiCalls:     Array.isArray(result.sources)
-      ? result.sources.slice(0, 6).map((s) => `${s?.name || "module"}: ${s?.detail || s?.verdict || ""}`.trim())
-      : [],
-    riskSteps:    Array.isArray(result.riskSteps) ? result.riskSteps.slice(0, 8) : [],
-    explanation:  result.explanation || "",
-    aiReasoning:  result.aiReasoning || null,
-    breakdown:    result && typeof result.breakdown === "object" ? result.breakdown : null,
-    educationTip: isSuspicious
-      ? "Do not enter passwords or personal information on this page."
-      : "",
-    // Use evaluator reasoning if available, fall back to original reasons
-    reasons: finalReasons.length > 0 ? finalReasons :
-      (isSuspicious && Array.isArray(result.reasons) ? result.reasons.slice(0, 3) : []),
-    // Expose final risk score and severity for overlay display
-    finalRisk: threatDecision?.finalRisk ?? (result.finalRiskScore || result.score),
-    severity: result.status,
-  };
-
-  sendOverlayWithRetry(tabId, payload);
-
-  // â”€â”€ Step 3: alert sound for suspicious (nice-to-have, non-fatal) â”€â”€â”€â”€â”€â”€
-  if (isSuspicious) {
-    chrome.tabs.sendMessage(tabId, {
-      type:      "sentinel:play-alert",
-      alertType: "suspicious",
-    }).catch(() => {});
-  }
-});
-
-
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+}
 // SECTION 11 â€” MESSAGE HANDLER
 
 // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   try {
-    if (!message || typeof message.type !== "string") return false;
+    if (!message || typeof message !== "object") return false;
+
+    if (typeof message.action === "string") {
+      switch (message.action) {
+        case "SENTINEL_RESCAN": {
+          const tabId = sender?.tab?.id ?? message.tabId;
+          const url = sender?.tab?.url ?? message.url;
+          if (!tabId || !url || !/^https?:\/\//i.test(String(url))) {
+            sendResponse({ ok: false, error: "missing tab or url" });
+            return true;
+          }
+          (async () => {
+            try {
+              await chrome.tabs
+                .sendMessage(tabId, {
+                  action: "SENTINEL_SCANNING",
+                  text: message.text || "Rescanning page…",
+                })
+                .catch(() => {});
+              await analyzeTab(tabId, url, { forceDeep: Boolean(message.forceDeep) });
+              sendResponse({ ok: true });
+            } catch (e) {
+              sendResponse({
+                ok: false,
+                error: e && e.message ? e.message : String(e),
+              });
+            }
+          })();
+          return true;
+        }
+        default:
+          break;
+      }
+    }
+
+    if (typeof message.type !== "string") return false;
 
     switch (message.type) {
+
+      case "GET_CURRENT_TAB_ID": {
+        sendResponse({ tabId: sender?.tab?.id ?? null });
+        return true;
+      }
+
+      case "GET_TAB_ANALYSIS": {
+        getTabAnalysis(message.tabId, (result) => {
+          if (!result) {
+            sendResponse(null);
+            return;
+          }
+          const canonical = globalThis.normalizeSentinelResult
+            ? globalThis.normalizeSentinelResult(result)
+            : result;
+          sendResponse(canonical);
+        });
+        return true;
+      }
+
+      case "TRIGGER_ANALYSIS": {
+        if (!message.tabId || !message.url) {
+          sendResponse({ error: "missing params" });
+          return true;
+        }
+        runFullAnalysis(message.tabId, message.url,
+          (() => { try { return new URL(message.url).hostname; } catch { return ""; } })()
+        );
+        setTimeout(() => {
+          getTabAnalysis(message.tabId, (r) => {
+            if (!r) { sendResponse(null); return; }
+            const canonical = globalThis.normalizeSentinelResult
+              ? globalThis.normalizeSentinelResult(r)
+              : r;
+            sendResponse(canonical);
+          });
+        }, 1200);
+        return true;
+      }
+
+      case "FORCE_BLOCK": {
+        const forcedResult = {
+          status: "malicious",
+          score: 100,
+          confidence: 95,
+          reasons: ["Manual force block requested"],
+          signals: [{ type: "category", value: "manual_block" }],
+        };
+        chrome.tabs.update(message.tabId, { url: buildWarningURL(forcedResult, message.url || "") }, () => {
+          void chrome.runtime.lastError;
+          sendResponse({ ok: true });
+        });
+        return true;
+      }
+
+      case "GENERATE_THREAT_REPORT": {
+        if (typeof generateThreatReport !== "function") {
+          sendResponse({ ok: false, error: "Threat reporting unavailable" });
+          return true;
+        }
+        (async () => {
+          try {
+            const report = await generateThreatReport(message.tabId, Boolean(message.exportHtml));
+            sendResponse({ ok: true, reportId: report.reportId, report });
+          } catch (e) {
+            sendResponse({ ok: false, error: e?.message || "Report generation failed" });
+          }
+        })();
+        return true;
+      }
+
+      case "sentinel:open-dashboard": {
+        chrome.tabs.create({ url: chrome.runtime.getURL("dashboard.html") }, () => {
+          void chrome.runtime.lastError;
+          sendResponse({ ok: true });
+        });
+        return true;
+      }
 
       case "sentinel:bypass-url": {
         if (!message.url) { sendResponse({ ok: false, error: "No URL" }); return true; }
@@ -1899,19 +2724,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       case "sentinel:get-analysis": {
         try {
-          storageGet([CONFIG.KEYS.LAST_ANALYSIS])
-            .then(data => {
-              try {
-                sendResponse({ result: (data && data[CONFIG.KEYS.LAST_ANALYSIS]) || null });
-              } catch (e) {
-                console.error("[Sentinel] Error in get-analysis response:", e);
-                sendResponse({ result: null, error: "Response failed" });
-              }
-            })
-            .catch(e => {
-              console.error("[Sentinel] get-analysis failed:", e);
-              sendResponse({ result: null, error: e?.message || "Storage read failed" });
-            });
+          const senderTabId = sender?.tab?.id;
+          const tabResult = Number.isInteger(senderTabId) ? tabAnalysisMap.get(senderTabId) : null;
+          sendResponse({ result: tabResult || null });
         } catch (e) {
           console.error("[Sentinel] get-analysis handler error:", e);
           sendResponse({ result: null, error: e?.message || "Unknown error" });
@@ -2087,6 +2902,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ ok: true, riskScore: TAB_BEHAVIOR_RISK.get(tabId) ?? 0, suppressed: true, reason: suppressionReason });
           return true;
         }
+      }
+
+      // Native browser prompts are not inherently malicious
+      if (isBrowserNativePermissionPromptSignal(message, event, alertDetails)) {
+        console.log("[Sentinel] Skipping threat score for browser-native permission prompt");
+        sendResponse({
+          ok: true,
+          riskScore: TAB_BEHAVIOR_RISK.get(tabId) ?? 0,
+          suppressed: true,
+          reason: "Native browser permission prompts are not scored as threats",
+        });
+        return true;
       }
 
       // Accumulate risk with event-aware weighting for realtime protection.
@@ -2287,6 +3114,176 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .catch((e) => sendResponse({ ok: false, error: e.message }));
       return true;
     }
+
+    case "SENTINEL_LEAVE_SITE": {
+      chrome.tabs.update(sender.tab.id, { url: "chrome://newtab/" });
+      return true;
+    }
+
+    case "SENTINEL_OPEN_REPORT": {
+      const tabId = sender?.tab?.id;
+      const query = Number.isFinite(tabId) ? `?tabId=${tabId}` : "";
+      chrome.tabs.create({
+        url: chrome.runtime.getURL(`report/report.html${query}`)
+      });
+      return true;
+    }
+
+    case "SENTINEL_BYPASS": {
+      (async () => {
+        try {
+          const { url, bypassType } = message || {};
+          if (!url) {
+            sendResponse({ ok: false, error: "Missing url" });
+            return;
+          }
+
+          // Log the bypass with type for audit history
+          const history = await chrome.storage.local.get("sx_bypass_history");
+          const log = history.sx_bypass_history || [];
+          log.unshift({
+            url,
+            bypassType,     // 'warned' or 'direct'
+            timestamp: Date.now(),
+            score: message.score || 0
+          });
+          // Keep last 100 bypass events
+          await chrome.storage.local.set({
+            sx_bypass_history: log.slice(0, 100)
+          });
+
+          // Add to session whitelist so the page loads on redirect
+          const session = await chrome.storage.session.get("sx_session_bypass");
+          const bypassed = session.sx_session_bypass || [];
+          bypassed.push(url);
+          await chrome.storage.session.set({ sx_session_bypass: bypassed });
+
+          // Keep per-domain bypass count for warning page history badge
+          let bypassDomain = "";
+          try { bypassDomain = new URL(url).hostname; } catch {}
+          if (bypassDomain) {
+            const countData = await chrome.storage.local.get("sx_bypass_counts");
+            const counts = countData.sx_bypass_counts || {};
+            counts[bypassDomain] = Number(counts[bypassDomain] || 0) + 1;
+            await chrome.storage.local.set({ sx_bypass_counts: counts });
+          }
+
+          sendResponse({ ok: true });
+        } catch (e) {
+          sendResponse({ ok: false, error: e?.message || "Bypass failed" });
+        }
+      })();
+      return true;
+    }
+
+    case "SENTINEL_MARK_SAFE": {
+      const { domain: safeDomain, timestamp: safeTs } = message;
+      if (!safeDomain) {
+        sendResponse({ ok: false, error: "Missing domain" });
+        return true;
+      }
+      chrome.storage.local.get(["sentinel_user_trust"], (res) => {
+        const trust = res.sentinel_user_trust || {};
+        trust[safeDomain] = { markedAt: safeTs, source: "user" };
+        chrome.storage.local.set({ sentinel_user_trust: trust });
+      });
+      chrome.storage.local.get(["sentinel_fp_log"], (res) => {
+        const log = res.sentinel_fp_log || [];
+        log.push({ domain: safeDomain, url: message.url, timestamp: safeTs });
+        chrome.storage.local.set({ sentinel_fp_log: log.slice(-50) }, () => {
+          sendResponse({ ok: true });
+        });
+      });
+      return true;
+    }
+
+    case "SENTINEL_REPORT_SITE": {
+      const { domain: rDomain, url: rUrl, score: rScore, timestamp: rTs } = message;
+      chrome.storage.local.get(["sentinel_reports"], (res) => {
+        const reports = res.sentinel_reports || [];
+        reports.push({ domain: rDomain, url: rUrl, score: rScore, timestamp: rTs });
+        chrome.storage.local.set({ sentinel_reports: reports.slice(-100) }, () => {
+          sendResponse({ ok: true });
+        });
+      });
+      return true;
+    }
+
+    case "GET_BYPASS_COUNT": {
+      const domain = String(message.domain || "").toLowerCase();
+      if (!domain) {
+        sendResponse({ count: 0 });
+        return true;
+      }
+      chrome.storage.local.get("sx_bypass_counts", (res) => {
+        const counts = res.sx_bypass_counts || {};
+        sendResponse({ count: Number(counts[domain] || 0) });
+      });
+      return true;
+    }
+
+    case "SENTINEL_REPORT_FALSE_POSITIVE": {
+      // FIX 5A: Increment false positive count for domain
+      const domain = String(message.domain || "").toLowerCase().trim();
+      if (domain) {
+        const fpKey = "fp_reports_" + domain;
+        chrome.storage.local.get(fpKey, (data) => {
+          const nextCount = Number(data[fpKey] || 0) + 1;
+          chrome.storage.local.set({ [fpKey]: nextCount });
+
+          // If count >= 3, lower domain score next analysis
+          if (nextCount >= 3) {
+            console.log(`[Sentinel] Domain ${domain} marked as safe (3+ reports)`);
+          }
+        });
+      }
+      return true;
+    }
+
+    case "sentinel:get-scan-history": {
+      // FIX 5B: Return last 20 scans for popup history view
+      chrome.storage.local.get("sentinel_history", (data) => {
+        sendResponse({ history: data.sentinel_history || [] });
+      });
+      return true;
+    }
+
+    case "sentinel:get-incidents": {
+      // FIX 6C: Return incident log (last 10 SUSPICIOUS/MALICIOUS hits)
+      chrome.storage.local.get("sentinel_incidents", (data) => {
+        const incidents = data.sentinel_incidents || [];
+        sendResponse({ incidents: incidents.slice(0, 10) });
+      });
+      return true;
+    }
+
+    case "sentinel:set-sensitivity": {
+      // FIX 6D: Save sensitivity mode (low / medium / high)
+      const mode = message.mode || "medium";
+      chrome.storage.local.set({ sentinel_sensitivity: mode });
+      sendResponse({ ok: true });
+      return true;
+    }
+
+    case "sentinel:get-admin-stats": {
+      // FIX 6E: Return admin stats for popup badge (today's counts)
+      const today = new Date().toDateString();
+      chrome.storage.local.get(["sentinel_history", "sentinel_incidents"], (data) => {
+        const history = data.sentinel_history || [];
+        const incidents = data.sentinel_incidents || [];
+        
+        const todayScans = history.filter(h => new Date(h.timestamp).toDateString() === today);
+        const todayThreats = incidents.filter(i => new Date(i.timestamp).toDateString() === today);
+        
+        sendResponse({
+          scans: todayScans.length,
+          threats: todayThreats.length,
+          incidents: incidents.length
+        });
+      });
+      return true;
+    }
+
     default:
       return false;
   }
@@ -2352,8 +3349,23 @@ async function loadThreatIntelDB() {
 
 chrome.runtime.onInstalled.addListener((details) => {
   console.log("[Sentinel] ðŸš€ Extension installed/updated:", details.reason);
+  // CHANGED: Keepalive alarm so SW does not sleep mid-analysis (Part 1D)
+  chrome.alarms.create("sx-keepalive", { periodInMinutes: 0.4 });
   // Load threat intel on install/update so new domains are available immediately
   loadThreatIntelDB();
+  chrome.tabs.query({}, (tabs) => {
+    if (chrome.runtime.lastError) return;
+    tabs.forEach(tab => {
+      if (!tab || !isAnalyzableTabUrl(tab.url)) return;
+      setTimeout(() => {
+        runFullAnalysis(
+          tab.id,
+          tab.url,
+          (() => { try { return new URL(tab.url).hostname; } catch { return ""; } })()
+        );
+      }, 500);
+    });
+  });
   if (details.reason === "install") {
     storageSet({
       [CONFIG.KEYS.BYPASSES]:     {},
@@ -2381,15 +3393,57 @@ chrome.runtime.onInstalled.addListener((details) => {
 
 chrome.runtime.onStartup.addListener(() => {
   console.log("[Sentinel] â° Service worker restarted â€” LRU cache cleared");
+  // CHANGED: Keepalive alarm so SW does not sleep mid-analysis (Part 1D)
+  chrome.alarms.create("sx-keepalive", { periodInMinutes: 0.4 });
   loadThreatIntelDB(); // Refresh threat intel after SW restart
+  // CHANGED: Reload recovery — analyze existing tabs after SW restart
+  chrome.tabs.query({}, (tabs) => {
+    if (chrome.runtime.lastError) return;
+    (tabs || []).forEach((tab) => {
+      if (!tab || !isAnalyzableTabUrl(tab.url)) return;
+      setTimeout(() => {
+        runFullAnalysis(
+          tab.id,
+          tab.url,
+          (() => { try { return new URL(tab.url).hostname; } catch { return ""; } })()
+        );
+      }, 500);
+    });
+  });
+});
+
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  chrome.tabs.get(tabId, (tab) => {
+    if (chrome.runtime.lastError || !tab || !tab.url) return;
+    if (!/^https?:\/\//i.test(tab.url)) return;
+    getTabAnalysis(tabId, (existing) => {
+      if (existing) return;
+      runFullAnalysis(tabId, tab.url,
+        (() => { try { return new URL(tab.url).hostname; } catch { return ""; } })()
+      );
+    });
+  });
+});
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== "complete") return;
+  if (!tab.url || !/^https?:\/\//i.test(tab.url)) return;
+
+  getTabAnalysis(tabId, (existing) => {
+    if (existing && existing.url === tab.url) return;
+    runFullAnalysis(tabId, tab.url,
+      (() => { try { return new URL(tab.url).hostname; } catch { return ""; } })()
+    );
+  });
 });
 
 // Clean up in-memory behavior risk scores when a tab is closed
 chrome.tabs.onRemoved.addListener((tabId) => {
   TAB_BEHAVIOR_RISK.delete(tabId);
   redirectLoopTracker.delete(tabId);
+  clearTabAnalysis(tabId);
+  TAB_COOLDOWN.delete(tabId); // CHANGED: cleanup per-tab cooldown
 });
-
 // Load threat intel immediately on first SW initialization
 function initSentinel() {
   console.log("[Sentinel] Detection started");

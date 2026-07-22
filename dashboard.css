@@ -620,4 +620,99 @@ tr.row-bypassed td {
     text-align: center;
   }
 }
+:root {
+  --sx-bg: #0A0E1A;
+  --sx-surface: #111827;
+  --sx-accent: #00E5FF;
+  --sx-danger: #FF3D57;
+  --sx-warning: #FFB830;
+  --sx-safe: #00C896;
+  --sx-border: rgba(255,255,255,0.08);
+  --sx-text: #FFFFFF;
+  --sx-muted: rgba(255,255,255,0.55);
+}
+
+body {
+  background: var(--sx-bg) !important;
+  color: var(--sx-text) !important;
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif !important;
+}
+
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin: 18px 0;
+}
+
+.overview-card, .chart-card {
+  background: var(--sx-surface);
+  border: 1px solid var(--sx-border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.overview-card span {
+  display: block;
+  color: var(--sx-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+
+.overview-card strong {
+  display: block;
+  margin-top: 8px;
+  font: 800 32px/1 "JetBrains Mono", ui-monospace, monospace;
+  color: var(--sx-safe);
+}
+
+.overview-card.danger strong { color: var(--sx-danger); }
+.overview-card.warning strong { color: var(--sx-warning); }
+.overview-card.accent strong { color: var(--sx-accent); }
+
+.chart-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.chart-header h2 { margin: 0; font-size: 18px; }
+.chart-header span { color: var(--sx-muted); font-size: 12px; }
+.bar-chart {
+  height: 150px;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  align-items: end;
+  gap: 10px;
+}
+.bar-day {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: 1fr auto;
+  gap: 8px;
+  height: 100%;
+}
+.bar-day i {
+  align-self: end;
+  display: block;
+  min-height: 4px;
+  border-radius: 6px 6px 0 0;
+  background: linear-gradient(180deg, var(--sx-accent), rgba(0,229,255,.25));
+}
+.bar-day span {
+  color: var(--sx-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.status-pill {
+  border-radius: 999px !important;
+  border: 1px solid var(--sx-border);
+}
+
+@media (max-width: 800px) {
+  .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 

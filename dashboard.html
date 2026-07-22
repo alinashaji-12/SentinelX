@@ -12,9 +12,21 @@
 
       <!-- â”€â”€ Header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
       <header class="header">
-        <h1>ðŸ›¡ï¸ Sentinel Browse Dashboard</h1>
-        <p>Threat history Â· Adaptive intelligence profile Â· URL simulation</p>
+        <h1>SentinelX Security Dashboard</h1>
+        <p>Threat history - adaptive intelligence profile - URL simulation</p>
       </header>
+
+      <section class="overview-grid" aria-label="Security statistics">
+        <article class="overview-card"><span>Scans</span><strong id="statScans">0</strong></article>
+        <article class="overview-card danger"><span>Threats</span><strong id="statThreats">0</strong></article>
+        <article class="overview-card warning"><span>Suspicious</span><strong id="statSuspicious">0</strong></article>
+        <article class="overview-card accent"><span>AI-assisted</span><strong id="statAi">0</strong></article>
+      </section>
+
+      <section class="chart-card" aria-label="Seven day scan chart">
+        <div class="chart-header"><h2>7-Day Activity</h2><span>Local storage telemetry</span></div>
+        <div class="bar-chart" id="sevenDayChart"></div>
+      </section>
 
       <!-- â”€â”€ Filter bar + actions â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ -->
       <section class="filters" aria-label="Table filters">

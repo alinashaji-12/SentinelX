@@ -2,17 +2,20 @@
   "manifest_version": 3,
   "name": "Sentinel Browse",
   "version": "2.0.0",
-  "description": "Real-time URL threat detection and blocking. Protects against phishing, malware, and typosquatting.",
+  "description": "Advanced Cyber Protection — Real-time URL threat detection and blocking. Protects against phishing, malware, and typosquatting.",
 
   "permissions": [
-    "storage",
-    "tabs",
-    "webNavigation",
-    "webRequest",
     "declarativeNetRequest",
     "declarativeNetRequestFeedback",
+    "alarms",
+    "storage",
+    "tabs",
+    "activeTab",
+    "webNavigation",
+    "webRequest",
     "scripting",
-    "activeTab"
+    "notifications",
+    "downloads"
   ],
 
   "host_permissions": [
@@ -31,7 +34,7 @@
   "declarative_net_request": {
     "rule_resources": [
       {
-        "id": "sentinel_static_rules",
+        "id": "ruleset_1",
         "enabled": true,
         "path": "rules.json"
       }
@@ -43,6 +46,8 @@
       "resources": [
         "warning.html",
         "warning.js",
+        "report/report.html",
+        "report/report.js",
         "assets/*"
       ],
       "matches": ["<all_urls>"]
@@ -51,14 +56,14 @@
 
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["behaviorMonitor.js"],
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["shared/trustedDomains.js", "shared/signals.js", "behaviorMonitor.js"],
       "run_at": "document_start",
       "all_frames": false
     },
     {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["shared/trustedDomains.js", "shared/signals.js", "shared/sentinelResult.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": false
     }

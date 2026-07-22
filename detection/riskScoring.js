@@ -83,6 +83,11 @@ export function calculateBehaviorScore(behaviorSignals = []) {
   let signalCount = 0;
 
   for (const signal of behaviorSignals) {
+    // Native browser prompts are not inherently malicious
+    if (signal.type === "permission_prompt" && signal.source === "browser_native") {
+      continue;
+    }
+
     const baseWeight = SIGNAL_WEIGHTS[signal.event] || 5;
     const confidenceMultiplier = getConfidenceWeight(signal.confidence);
     const signalScore = baseWeight * confidenceMultiplier;

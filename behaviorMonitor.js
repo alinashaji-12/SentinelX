@@ -64,27 +64,6 @@ const PROBE_TOKEN = `sentinel-probe-${Math.random().toString(36).slice(2)}`;
 // detectors observe.  Matching uses endsWith() so all subdomains are
 // covered (e.g. accounts.google.com, mail.google.com, etc.).
 //
-// This list is intentionally broader than CLIPBOARD_TRUSTED_DOMAINS:
-// it covers ALL signal types (redirect, pushState, iframes, downloads).
-
-const SAFE_DOMAINS = [
-  "google.com",
-  "youtube.com",
-  "youtu.be",
-  "doubleclick.net",
-  "googletagmanager.com",
-  "google-analytics.com",
-  "googletagservices.com",
-  "gstatic.com",
-  "googleapis.com",
-  "googlevideo.com",
-  "christuniversity.in",
-  "microsoft.com",
-  "microsoftonline.com",
-  "github.com",
-  "cloudflare.com",
-];
-
 /**
  * Returns true if the current page hostname is a known-safe domain.
  * Checked inside reportBehavior() — the single chokepoint for all signals.
@@ -92,8 +71,10 @@ const SAFE_DOMAINS = [
  * @returns {boolean}
  */
 function isSafeDomain(hostname) {
-  const h = String(hostname || "").toLowerCase();
-  return SAFE_DOMAINS.some(d => h === d || h.endsWith(`.${d}`));
+  if (typeof globalThis.isTrustedDomain === "function") {
+    return globalThis.isTrustedDomain(String(hostname || "").toLowerCase());
+  }
+  return false;
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -336,23 +317,6 @@ let clipboardEventTimestamps = [];
 const CLIPBOARD_WINDOW_MS = 3000;       // 3-second sliding window
 const CLIPBOARD_EVENT_THRESHOLD = 3;   // require MORE THAN 2 events (>2 = >=3)
 
-/**
- * Trusted domains where clipboard access is considered benign.
- * Matching is substring-based on location.hostname so subdomains are covered.
- * (Rule 4)
- */
-const CLIPBOARD_TRUSTED_DOMAINS = [
-  "google.com",
-  "youtube.com",
-  "youtu.be",
-  "christuniversity.in",
-  "microsoft.com",
-  "microsoftonline.com",
-  "github.com",
-  "notion.so",
-  "docs.google.com",
-];
-
 /** Counts rapid pushState calls to detect abuse */
 let pushStateCount    = 0;
 let pushStateResetTimer = null;
@@ -429,9 +393,9 @@ window.addEventListener("message", (event) => {
       // RULE 4 (first — cheapest check): Trusted domain early-exit.
       // If the current page is a known-safe domain, clipboard access is benign.
       const currentHostname = location.hostname.toLowerCase();
-      const isTrustedClipboardDomain = CLIPBOARD_TRUSTED_DOMAINS.some(
-        d => currentHostname === d || currentHostname.endsWith(`.${d}`)
-      );
+      const isTrustedClipboardDomain = typeof globalThis.isTrustedDomain === "function"
+        ? globalThis.isTrustedDomain(currentHostname)
+        : false;
       if (isTrustedClipboardDomain) {
         console.debug(`[Sentinel] ✅ Clipboard suppressed: trusted domain (${currentHostname})`);
         return;

@@ -29,11 +29,15 @@
 function sendMsg(message) {
   return new Promise((resolve, reject) => {
     try {
-      chrome.runtime.sendMessage(message, (response).catch(e => console.error("[Sentinel] sendMessage error:", e)) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-        } else {
-          resolve(response || {});
+      chrome.runtime.sendMessage(message, (response) => {
+        try {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else {
+            resolve(response || {});
+          }
+        } catch (e) {
+          reject(e);
         }
       });
     } catch (e) {
@@ -174,6 +178,38 @@ function renderTable() {
   }
 }
 
+function renderOverview(history) {
+  const items = Array.isArray(history) ? history : [];
+  const setText = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = String(value);
+  };
+  setText("statScans", items.length);
+  setText("statThreats", items.filter(i => i.status === "malicious").length);
+  setText("statSuspicious", items.filter(i => i.status === "suspicious").length);
+  setText("statAi", items.filter(i => i.aiScore !== null && i.aiScore !== undefined).length);
+
+  const chart = document.getElementById("sevenDayChart");
+  if (!chart) return;
+  const now = new Date();
+  const days = Array.from({ length: 7 }, (_, index) => {
+    const d = new Date(now);
+    d.setDate(now.getDate() - (6 - index));
+    const key = d.toISOString().slice(0, 10);
+    return { key, label: d.toLocaleDateString([], { weekday: "short" }), count: 0 };
+  });
+  for (const item of items) {
+    const date = new Date(item.timestamp || Date.now()).toISOString().slice(0, 10);
+    const day = days.find(d => d.key === date);
+    if (day) day.count += 1;
+  }
+  const max = Math.max(1, ...days.map(d => d.count));
+  chart.innerHTML = days.map(day => {
+    const height = Math.max(4, Math.round((day.count / max) * 100));
+    return `<div class="bar-day" title="${day.count} scans"><i style="height:${height}%"></i><span>${day.label}</span></div>`;
+  }).join("");
+}
+
 function setupFilters() {
   const buttons = Array.from(document.querySelectorAll(".filter-btn[data-filter]"));
   buttons.forEach(btn => {
@@ -195,6 +231,7 @@ async function loadHistory() {
     const history  = Array.isArray(response.history) ? response.history : [];
     historyItems   = history;
     latestReport   = generateReport(history); // Pre-compute for "Generate Report" button
+    renderOverview(history);
     renderTable();
   } catch (e) {
     console.warn("[Dashboard] History load failed:", e);
@@ -223,7 +260,7 @@ async function loadLatestIntel() {
 
     const finalRisk = typeof a.finalRiskScore === "number"
       ? Math.max(0, Math.min(100, Math.round(a.finalRiskScore)))
-      : Math.max(0, Math.min(100, Math.round((Number(a.score || 0)) * 10)));
+      : Math.max(0, Math.min(100, Math.round(Number(a.score || 0))));
     const behaviorSignals = Array.isArray(a.signals)
       ? a.signals.filter(s => typeof s === "string" && /(clipboard|download|redirect|iframe|phishing|scam|behavior)/i.test(s))
       : [];

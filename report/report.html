@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SentinelX Security Report</title>
+  <style>
+    :root {
+      --bg: #0a0f16;
+      --card: rgba(18, 25, 36, 0.85);
+      --border: rgba(255, 255, 255, 0.14);
+      --text: #eaf3ff;
+      --muted: rgba(234, 243, 255, 0.7);
+      --safe: #25d27f;
+      --warn: #ffb548;
+      --danger: #ff5f6f;
+      --accent: #7cd8ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: radial-gradient(120% 80% at 50% -20%, rgba(124, 216, 255, 0.15), transparent 60%), var(--bg);
+      color: var(--text);
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    #root { max-width: 1020px; margin: 0 auto; padding: 24px; }
+    .top {
+      display: flex; justify-content: space-between; align-items: center; gap: 12px;
+      border: 1px solid var(--border); border-radius: 14px; background: var(--card); padding: 14px 16px;
+    }
+    .brand-title { font-size: 20px; font-weight: 700; line-height: 1.2; }
+    .brand-sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .btn {
+      border: 1px solid var(--border); background: rgba(124, 216, 255, 0.12); color: var(--text);
+      border-radius: 10px; padding: 8px 12px; cursor: pointer; font-size: 12px;
+    }
+    .verdict {
+      margin-top: 16px; border: 1px solid var(--border); border-radius: 14px; padding: 16px;
+      background: rgba(37, 210, 127, 0.14);
+    }
+    .verdict.warn { background: rgba(255, 181, 72, 0.14); }
+    .verdict.danger { background: rgba(255, 95, 111, 0.14); }
+    .verdict-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    .status-line { font-size: 22px; font-weight: 700; }
+    .score-line { font-size: 14px; color: var(--muted); margin-top: 6px; }
+    .summary { margin-top: 8px; font-size: 14px; color: rgba(234, 243, 255, 0.88); }
+    .bar-wrap { margin-top: 12px; height: 10px; border-radius: 999px; background: rgba(255, 255, 255, 0.14); overflow: hidden; }
+    .bar-fill { width: 0%; height: 100%; border-radius: 999px; background: var(--safe); transition: width 1.2s ease; }
+    .section {
+      margin-top: 16px; border: 1px solid var(--border); border-radius: 14px; background: var(--card); padding: 14px;
+    }
+    .section h3 { margin: 0 0 10px; font-size: 12px; letter-spacing: .08em; color: var(--accent); text-transform: uppercase; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .fact { background: rgba(255, 255, 255, 0.04); border-radius: 10px; padding: 8px 10px; }
+    .fact div { font-size: 11px; color: var(--muted); }
+    .fact strong { display: block; margin-top: 4px; font-size: 13px; word-break: break-word; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    td, th { border-bottom: 1px solid rgba(255, 255, 255, 0.08); padding: 8px 4px; text-align: left; }
+    .muted { color: var(--muted); }
+    .footer { margin-top: 16px; font-size: 12px; color: var(--muted); text-align: center; }
+  </style>
+</head>
+<body>
+  <div id="root">
+    <header class="top">
+      <div>
+        <div class="brand-title">SentinelX</div>
+        <div class="brand-sub">Advanced Cyber Protection</div>
+      </div>
+      <button id="printBtn" class="btn" type="button">Print / Export PDF</button>
+    </header>
+
+    <section id="verdictCard" class="verdict">
+      <div class="verdict-head">
+        <div>
+          <div id="badge" class="status-line">✓ This site is safe</div>
+          <div id="summary" class="summary">Awaiting scan summary…</div>
+        </div>
+        <div class="score-line">
+          <div id="score">0 / 100</div>
+          <div id="confidence">0% confidence</div>
+        </div>
+      </div>
+      <div class="bar-wrap"><div id="scoreBar" class="bar-fill"></div></div>
+    </section>
+
+    <section class="section">
+      <h3>Domain Intelligence</h3>
+      <div class="grid-2">
+        <div id="leftFacts"></div>
+        <div id="rightFacts"></div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h3>Signals</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Signal</th>
+            <th>Why it matters</th>
+            <th>Risk contribution</th>
+          </tr>
+        </thead>
+        <tbody id="riskRows"></tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h3>Analysis</h3>
+      <div id="reasoning" class="muted">Waiting for analysis reasoning…</div>
+      <div id="categories" style="margin-top:10px;"></div>
+      <ul id="behavior" style="margin-top:10px;"></ul>
+      <ul id="actions" style="margin-top:10px;"></ul>
+      <div style="margin-top:10px; display:flex; gap:8px;">
+        <button id="falsePositiveBtn" class="btn" type="button">Report issue</button>
+        <button id="exportJsonBtn" class="btn" type="button">Export JSON</button>
+      </div>
+    </section>
+
+    <section class="section">
+      <h3>Scan Metadata</h3>
+      <div id="analysedUrl" class="muted"></div>
+      <div id="analysedAt" class="muted"></div>
+      <div class="footer">Scanned by SentinelX Advanced Cyber Protection · v<span id="version">2.0.0</span></div>
+    </section>
+
+    <!-- Legacy hooks kept for compatibility -->
+    <div id="facts" style="display:none;"></div>
+  </div>
+  <script src="../shared/trustedDomains.js"></script>
+  <script src="../shared/sentinelResult.js"></script>
+  <script src="report.js"></script>
+</body>
+</html>

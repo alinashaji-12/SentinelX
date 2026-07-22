@@ -150,9 +150,9 @@ const ADAPTIVE_CONFIG = {
    * else → safe
    */
   THRESHOLDS: {
-    high:   { suspicious: 2, malicious: 5 },  // Tighter — easier to block
-    normal: { suspicious: 3, malicious: 6 },  // Default
-    low:    { suspicious: 4, malicious: 7 },  // Relaxed — blocks less
+    high:   { suspicious: 35, malicious: 75 },
+    normal: { suspicious: 40, malicious: 80 },
+    low:    { suspicious: 50, malicious: 85 },
   },
 
   /** Storage key names — must match background.js CONFIG.KEYS */
@@ -401,7 +401,7 @@ function computeSensitivityLevel(userProfile) {
  */
 function computeFinalScore(baseScore, reputationWeight, behaviorAdjustment) {
   const raw = (Number(baseScore) || 0) + reputationWeight + behaviorAdjustment;
-  return Math.max(-5, Math.min(15, raw));
+  return Math.max(0, Math.min(100, Math.round(raw)));
 }
 
 /**
@@ -490,10 +490,10 @@ async function applyAdaptiveScoring(baseResult, hostname) {
   // Hard-safe guard: if base result is a hard-override trusted/safe domain,
   // skip ALL adaptive processing. These domains have score = -5 and we
   // never want to re-classify trusted domains as suspicious.
-  if (baseResult.score <= -5 || baseResult.appliedRule === "HARD_OVERRIDE_TRUSTED") {
+  if (baseResult.appliedRule === "HARD_OVERRIDE_TRUSTED") {
     return {
       ...baseResult,
-      finalScore: baseResult.score,
+      finalScore: Math.max(0, Math.min(100, Math.round(Number(baseResult.score) || 0))),
       reputationWeight: 0,
       behaviorAdjustment: 0,
       sensitivityLevel: "normal",

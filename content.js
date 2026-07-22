@@ -1,2204 +1,748 @@
-/**
- * content.js — Sentinel Browse Extension
- *
- * Injected into every page. Handles:
- *  - Overlay rendering (safe / suspicious / malicious)
- *  - Alert sound playback (one per page load)
- *  - Dismiss button for non-safe overlays
- */
-
-let hasPlayedAlertForPage = false;
-let overlayElement = null;
-let overlayHideTimeoutId = null;
-let _devModeEnabled = false;
-
-console.log("[Sentinel] Content script ACTIVE on:", location.href);
-
-// ══════════════════════════════════════════════════════════════════
-// REAL-TIME LOCAL DETECTION ENGINE (content-side)
-// ══════════════════════════════════════════════════════════════════
-
-const _SENTINEL_TRUSTED = new Set([
-  "google.com", "youtube.com", "github.com", "microsoft.com",
-  "apple.com", "amazon.com", "stackoverflow.com", "mozilla.org",
-  "wikipedia.org", "linkedin.com", "twitter.com", "x.com",
-  "reddit.com", "openai.com", "chatgpt.com", "cloudflare.com",
-  "netflix.com", "instagram.com", "facebook.com", "bing.com",
-  "yahoo.com", "duckduckgo.com", "office.com", "live.com",
-]);
-
-function _sentinelRootDomain(hostname) {
-  const parts = (hostname || "").replace(/^www\./, "").split(".").filter(Boolean);
-  return parts.length >= 2 ? parts.slice(-2).join(".") : hostname;
-}
-
-function evaluateThreat() {
-  let risk = 0;
-  const signals = [];
-  const hostname = location.hostname.toLowerCase();
-  const rootDomain = _sentinelRootDomain(hostname);
-  const isTrusted = _SENTINEL_TRUSTED.has(rootDomain) || _SENTINEL_TRUSTED.has(hostname);
-
-  // ── Signal 1: Insecure connection ────────────────────────────────
-  if (location.protocol !== "https:") {
-    risk += 40;
-    signals.push("insecure_connection");
-  }
-
-  // ── Signal 2: Password / login form ──────────────────────────────
-  if (document.querySelector("input[type='password']")) {
-    risk += 25;
-    signals.push("login_form_detected");
-  }
-
-  // ── Signal 3: External cross-origin iframe ────────────────────────
-  const iframes = Array.from(document.querySelectorAll("iframe"));
-  const hasExtIframe = iframes.some(f => {
-    try { return f.src && !new URL(f.src).hostname.endsWith(hostname); } catch { return false; }
-  });
-  if (hasExtIframe) {
-    risk += 20;
-    signals.push("external_iframe");
-  }
-
-  // ── Trust modifier: reduce risk 30% for known-safe domains ───────
-  if (isTrusted) {
-    risk = Math.round(risk * 0.7);
-  }
-
-  console.log("[Sentinel] Risk Score:", risk);
-  console.log("[Sentinel] Signals:", signals);
-
-  if (isTrusted && risk < 50) {
-    console.log("[Sentinel] Decision: IGNORE (trusted domain)");
-    return null;
-  }
-  if (risk >= 50) {
-    console.log("[Sentinel] Decision: SHOW — danger");
-    return { risk, signals, level: "danger" };
-  }
-  if (risk >= 25) {
-    console.log("[Sentinel] Decision: SHOW — warning");
-    return { risk, signals, level: "warning" };
-  }
-  console.log("[Sentinel] Decision: IGNORE");
-  return null;
-}
-
-// ══════════════════════════════════════════════════════════════════
-// PROFESSIONAL CYBER UI OVERLAY
-// ══════════════════════════════════════════════════════════════════
-
-function showSentinelAlert(data) {
-  if (!data) return;
-  if (document.getElementById("sentinel-security-overlay")) return;
-
-  const { risk, signals, level } = data;
-  const domain    = location.hostname || "unknown";
-  const isSecure  = location.protocol === "https:";
-
-  // ── Colour palette per severity ──────────────────────────────────
-  const threatColor  = level === "danger" ? "#ff1a1a" : "#ff9500";
-  const glowColor    = level === "danger" ? "rgba(255,26,26,0.6)"  : "rgba(255,149,0,0.5)";
-  const threatLabel  = level === "danger" ? "HIGH RISK" : "MEDIUM RISK";
-
-  // ── SSL tri-state indicator ───────────────────────────────────────
-  let connLabel, sslIcon, sslColor;
-  if (isSecure && level !== "danger") {
-    sslIcon = "🔒"; sslColor = "#00ff88";
-    connLabel = `<span style='color:${sslColor};font-weight:700;'>${sslIcon} SECURE (HTTPS)</span>`;
-  } else if (!isSecure && level === "danger") {
-    sslIcon = "❌"; sslColor = "#ff1a1a";
-    connLabel = `<span style='color:${sslColor};font-weight:700;'>${sslIcon} HIGH RISK — NO ENCRYPTION</span>`;
-  } else {
-    sslIcon = "⚠"; sslColor = "#ff9500";
-    connLabel = `<span style='color:${sslColor};font-weight:700;'>${sslIcon} NOT SECURE (HTTP)</span>`;
-  }
-
-  // ── Signals list HTML ────────────────────────────────────────────
-  const signalsHtml = signals.length
-    ? signals.map(s =>
-        `<li style="margin:6px 0;color:#cbd5e1;display:flex;align-items:center;gap:8px;">
-           <span style="color:${threatColor};font-size:10px;">▶</span>
-           ${s.replace(/_/g, " ").toUpperCase()}
-         </li>`
-      ).join("")
-    : `<li style="color:#475569;">No specific signals detected</li>`;
-
-  // ── Inject keyframe CSS once per page ────────────────────────────
-  if (!document.getElementById("sentinel-styles-v3")) {
-    const st = document.createElement("style");
-    st.id = "sentinel-styles-v3";
-    st.textContent = `
-      @keyframes _sv3-fadein  { from{opacity:0;transform:translateY(12px) scale(.97)} to{opacity:1;transform:translateY(0) scale(1)} }
-      @keyframes _sv3-pulse   {
-        0%,100% { box-shadow:0 0 18px ${glowColor},0 0 36px ${glowColor},inset 0 0 12px rgba(0,0,0,0.6); }
-        50%      { box-shadow:0 0 40px ${glowColor},0 0 80px ${glowColor},inset 0 0 20px rgba(0,0,0,0.4); }
-      }
-      @keyframes _sv3-shake   { 0%,100%{transform:translateX(0)} 20%,60%{transform:translateX(-6px)} 40%,80%{transform:translateX(6px)} }
-      @keyframes _sv3-scanline { 0%{transform:translateY(-100%)} 100%{transform:translateY(100vh)} }
-      @keyframes _sv3-bar     { from{width:0%} to{width:${Math.min(risk, 100)}%} }
-      @keyframes _sv3-blink   { 0%,100%{opacity:1} 50%{opacity:0.3} }
-      @keyframes _sv3-typing  {
-        from { width:0 }
-        to   { width:100% }
-      }
-      #sentinel-security-overlay { animation: _sv3-fadein .4s cubic-bezier(.22,1,.36,1) forwards; }
-      #_sv3-card {
-        animation:
-          _sv3-pulse 2.4s ease-in-out infinite,
-          ${level === "danger" ? "_sv3-shake .6s ease .3s" : "none"};
-      }
-      #_sv3-risk-bar { animation: _sv3-bar 1.4s cubic-bezier(.22,1,.36,1) .5s both; }
-      #_sv3-scanline { animation: _sv3-scanline 4s linear infinite; pointer-events:none; }
-      #_sv3-cursor   { animation: _sv3-blink .8s step-end infinite; }
-      #_sv3-title    { overflow:hidden;white-space:nowrap; animation: _sv3-typing .6s steps(24,end) .3s both; }
-      #sentinel-leave-btn:hover  { filter:brightness(1.15); transform:translateY(-1px); }
-      #sentinel-ignore-btn:hover { background:rgba(255,255,255,.07)!important; color:#94a3b8!important; }
-      #sentinel-leave-btn, #sentinel-ignore-btn { transition: all 180ms ease; }
-    `;
-    (document.head || document.documentElement).appendChild(st);
-  }
-
-  // ── Build overlay DOM ────────────────────────────────────────────
-  const overlay = document.createElement("div");
-  overlay.id    = "sentinel-security-overlay";
-  overlay.setAttribute("role", "alertdialog");
-  overlay.setAttribute("aria-modal", "true");
-
-  overlay.innerHTML = `
-  <div style="
-    position:fixed;inset:0;
-    background:linear-gradient(160deg,#020617 0%,#060d1f 55%,#0a0e1f 100%);
-    z-index:2147483647;
-    display:flex;align-items:center;justify-content:center;
-    font-family:'Courier New',Courier,monospace;
-    padding:20px;
-    overflow:hidden;
-  ">
-
-    <!-- Animated scanline -->
-    <div id="_sv3-scanline" style="
-      position:absolute;left:0;right:0;height:2px;
-      background:linear-gradient(90deg,transparent,rgba(0,255,140,.12),transparent);
-      top:0;
-    "></div>
-
-    <!-- Background grid -->
-    <div style="
-      position:absolute;inset:0;
-      background-image:
-        linear-gradient(rgba(0,255,140,.025) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0,255,140,.025) 1px, transparent 1px);
-      background-size:40px 40px;
-      pointer-events:none;
-    "></div>
-
-    <!-- Main card -->
-    <div id="_sv3-card" style="
-      border:1.5px solid ${threatColor};
-      border-radius:12px;
-      padding:36px 42px;
-      max-width:560px;width:100%;
-      background:rgba(2,6,23,.96);
-      color:#e2e8f0;
-      position:relative;
-      backdrop-filter:blur(12px);
-    ">
-
-      <!-- Corner decorations -->
-      <div style="position:absolute;top:0;left:0;width:16px;height:16px;border-top:2px solid ${threatColor};border-left:2px solid ${threatColor};border-radius:12px 0 0 0;"></div>
-      <div style="position:absolute;top:0;right:0;width:16px;height:16px;border-top:2px solid ${threatColor};border-right:2px solid ${threatColor};border-radius:0 12px 0 0;"></div>
-      <div style="position:absolute;bottom:0;left:0;width:16px;height:16px;border-bottom:2px solid ${threatColor};border-left:2px solid ${threatColor};border-radius:0 0 0 12px;"></div>
-      <div style="position:absolute;bottom:0;right:0;width:16px;height:16px;border-bottom:2px solid ${threatColor};border-right:2px solid ${threatColor};border-radius:0 0 12px 0;"></div>
-
-      <!-- Header -->
-      <div style="display:flex;align-items:center;gap:16px;border-bottom:1px solid rgba(255,255,255,.07);padding-bottom:20px;margin-bottom:24px;">
-        <div style="font-size:34px;line-height:1;filter:drop-shadow(0 0 8px ${threatColor});">🛡️</div>
-        <div style="flex:1;">
-          <div id="_sv3-title" style="color:${threatColor};font-size:15px;font-weight:900;letter-spacing:3px;text-transform:uppercase;">SENTINEL SECURITY ALERT<span id="_sv3-cursor" style="margin-left:2px;">█</span></div>
-          <div style="color:#334155;font-size:9px;margin-top:5px;letter-spacing:2px;">REAL-TIME THREAT DETECTION SYSTEM v3.0 • ${new Date().toLocaleTimeString()}</div>
-        </div>
-        <div style="
-          padding:4px 10px;border-radius:4px;
-          font-size:9px;letter-spacing:2px;font-weight:900;
-          background:${threatColor}22;border:1px solid ${threatColor}44;
-          color:${threatColor};
-        ">LIVE</div>
-      </div>
-
-      <!-- Risk bar -->
-      <div style="margin-bottom:24px;">
-        <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
-          <span style="color:#475569;font-size:9px;letter-spacing:2px;">RISK SCORE</span>
-          <span style="color:${threatColor};font-size:9px;font-weight:900;letter-spacing:1px;">${risk}/100</span>
-        </div>
-        <div style="background:rgba(255,255,255,.04);border-radius:4px;height:6px;overflow:hidden;border:1px solid rgba(255,255,255,.06);">
-          <div id="_sv3-risk-bar" style="height:100%;width:0%;background:linear-gradient(90deg,${threatColor}88,${threatColor});border-radius:4px;"></div>
-        </div>
-      </div>
-
-      <!-- Info grid -->
-      <div style="display:grid;grid-template-columns:120px 1fr;gap:12px 16px;font-size:12px;">
-        <span style="color:#334155;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;align-self:center;">DOMAIN</span>
-        <span style="color:#00ffcc;font-weight:bold;font-size:13px;letter-spacing:.5px;">${domain}</span>
-
-        <span style="color:#334155;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;align-self:center;">CONNECTION</span>
-        <span style="font-size:12px;">${connLabel}</span>
-
-        <span style="color:#334155;font-size:9px;letter-spacing:1.5px;text-transform:uppercase;align-self:center;">THREAT LEVEL</span>
-        <span style="display:inline-flex;align-items:center;gap:6px;">
-          <span style="width:8px;height:8px;border-radius:50%;background:${threatColor};display:inline-block;box-shadow:0 0 6px ${threatColor};"></span>
-          <span style="background:${threatColor};color:#000;padding:3px 14px;border-radius:999px;font-size:10px;font-weight:900;letter-spacing:2px;">${threatLabel}</span>
-        </span>
-      </div>
-
-      <!-- Signals panel -->
-      <div style="margin-top:22px;background:rgba(255,255,255,.02);border:1px solid rgba(255,255,255,.06);border-left:3px solid ${threatColor};border-radius:6px;padding:14px 18px;">
-        <div style="color:#334155;font-size:9px;letter-spacing:2px;text-transform:uppercase;margin-bottom:10px;">▸ THREAT SIGNALS DETECTED</div>
-        <ul style="margin:0;padding:0;list-style:none;">${signalsHtml}</ul>
-      </div>
-
-      <!-- Action buttons -->
-      <div style="display:flex;gap:12px;margin-top:28px;">
-        <button id="sentinel-leave-btn" style="
-          flex:1;padding:14px;
-          background:${threatColor};color:#000;
-          border:none;border-radius:8px;
-          font-family:'Courier New',monospace;
-          font-size:12px;font-weight:900;
-          letter-spacing:2.5px;cursor:pointer;
-          text-transform:uppercase;
-          box-shadow:0 0 20px ${glowColor};
-        ">← LEAVE SITE</button>
-        <button id="sentinel-ignore-btn" style="
-          flex:1;padding:14px;
-          background:transparent;color:#475569;
-          border:1px solid rgba(255,255,255,.1);
-          border-radius:8px;
-          font-family:'Courier New',monospace;
-          font-size:12px;font-weight:700;
-          letter-spacing:2px;cursor:pointer;
-          text-transform:uppercase;
-        ">IGNORE</button>
-      </div>
-
-      <!-- Footer -->
-      <div style="margin-top:20px;text-align:center;color:#1e293b;font-size:9px;letter-spacing:2.5px;">SENTINEL BROWSE v3.0 &bull; REAL-TIME PROTECTION ACTIVE</div>
-    </div>
-  </div>
-  `;
-
-  (document.body || document.documentElement).appendChild(overlay);
-
-  document.getElementById("sentinel-leave-btn")?.addEventListener("click", () => {
-    if (document.referrer) window.history.back();
-    else window.location.href = "https://www.google.com";
-  });
-  document.getElementById("sentinel-ignore-btn")?.addEventListener("click", () => {
-    overlay.remove();
-  });
-
-  // Optional: subtle sound cue for danger level
-  if (level === "danger") {
-    try { playAlertSound("malicious"); } catch {}
-  } else {
-    try { playAlertSound("suspicious"); } catch {}
-  }
-}
-
-// ── Run local detection after page is fully loaded ────────────────
-// CRITICAL FIX: content.js runs at document_idle — the "load" event
-// may have already fired before we register our listener. Always check
-// readyState first; only fall back to the event if still loading.
-function _runLocalSentinelDetection() {
-  setTimeout(() => {
-    const threat = evaluateThreat();
-    if (threat) showSentinelAlert(threat);
-  }, 800); // slightly faster — page is already rendered at this point
-}
-
-if (document.readyState === "complete") {
-  // Page already fully loaded — run immediately
-  _runLocalSentinelDetection();
-} else {
-  // Still loading — wait for the load event
-  window.addEventListener("load", _runLocalSentinelDetection, { once: true });
-}
-
-console.log("[Sentinel] Content script loaded:", location.href);
-let _networkMonitorInstalled = false;
-let _pageNetworkBridgeInstalled = false;
-let _decodedScriptAlertFired = false;
-let _phishingUiAlertSent = false;
-const _networkAlertSeen = new Set();
-const _MAX_NETWORK_ALERTS = 12;
-
-/**
- * Per-page deduplication guard for overlay messages.
- *
- * sendOverlayWithRetry in background.js retries on delivery failure.
- * If the first send succeeds but the callback fires late (race), the
- * second attempt may also be delivered. We key on status+rounded-risk
- * so legitimate severity escalations (suspicious → malicious) still show.
- */
-const _overlayShownKeys = new Map(); // FIX: was Set, but .get()/.set() (Map API) were being called
-const _OVERLAY_COOLDOWN_MS = 5000; // 5 s between same-key overlays
-
-document.addEventListener("DOMContentLoaded", () => {
-  console.log("[Sentinel] Content script ready");
-});
-
-function triggerSecurityOverlay(data) {
-  console.log("[Sentinel] Triggering overlay:", data);
-
-  const overlay = document.createElement("div");
-  overlay.id = "sentinel-overlay";
-  overlay.innerHTML = `
-    <div style="
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100vw;
-      height: 100vh;
-      background: rgba(255,0,0,0.85);
-      z-index: 999999;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: white;
-      font-size: 28px;
-      font-weight: bold;
-      text-align: center;
-    ">
-      ⚠️ DANGER ⚠️<br/>
-      ${data.reason}<br/>
-      Risk: ${data.risk}/100
-    </div>
-  `;
-
-  document.body.appendChild(overlay);
-}
-
-function showGuaranteedOverlay(data) {
-  try {
-    if (!data || typeof data !== "object") return;
-    if (document.getElementById("sentinel-overlay")) return;
-
-    const overlay = document.createElement("div");
-    overlay.id = "sentinel-overlay";
-    overlay.innerHTML = `
-      <div style="
-        position:fixed;
-        inset:0;
-        background:rgba(0,0,0,0.9);
-        z-index:999999;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        font-family:monospace;
-        color:#00ffcc;
-      ">
-        <div style="border:2px solid red; padding:30px; max-width:520px;">
-          <h2 style="margin:0 0 8px 0;">SENTINEL ALERT</h2>
-          <p style="margin:0 0 4px 0;">Risk: ${Number(data.risk) || 0}</p>
-          <p style="margin:0 0 12px 0;">${String(data.reason || "Suspicious activity detected.")}</p>
-          <button id="closeSentinel" style="padding:8px 12px;cursor:pointer;">DISMISS</button>
-        </div>
-      </div>
-    `;
-
-    (document.body || document.documentElement).appendChild(overlay);
-    const closeBtn = document.getElementById("closeSentinel");
-    if (closeBtn) {
-      closeBtn.onclick = () => overlay.remove();
-    }
-    console.log("[Sentinel] Overlay triggered");
-  } catch (err) {
-    console.error("[Sentinel] Guaranteed overlay failed:", err);
-  }
-}
-
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  try {
-    if (message?.type === "sentinel:play-alert") {
-      playAlert(message.alertType);
-      sendResponse({ ok: true });
-      return;
-    }
-
-    if (message?.type === "sentinel:show-overlay") {
-      // ── [Sentinel AI] Structured receive log ─────────────────────────
-      const _rcvRisk = message.finalScore ?? message.finalRisk ?? message.score ?? 0;
-      console.log("[Sentinel AI] Overlay received", {
-        status:   message.status,
-        risk:     _rcvRisk,
-        signals:  message.signals || [],
-        decision: message.status === "malicious" ? "FULL_SCREEN" : "CARD",
-      });
-
-      // ── Deduplication gate ───────────────────────────────────────────
-      // Key: status + risk bucketed to nearest 10 (so 42 and 48 share a key)
-      const _dedupeKey = `${message.status}:${Math.round(_rcvRisk / 10) * 10}`;
-      const _now = Date.now();
-      const _lastShown = _overlayShownKeys.get(_dedupeKey);
-
-      if (_lastShown && (_now - _lastShown) < _OVERLAY_COOLDOWN_MS) {
-        console.debug("[Sentinel AI] Overlay deduplicated — cooldown active", _dedupeKey);
-        sendResponse({ ok: true, deduplicated: true });
-        return;
-      }
-      _overlayShownKeys.set(_dedupeKey, _now);
-
-      // Cache debug context for dev_mode overlay rendering (best-effort).
-      try {
-        window.__sentinel_last_overlay_signals = Array.isArray(message.signals) ? message.signals : [];
-        window.__sentinel_last_overlay_score = typeof message.score === "number" ? message.score : null;
-        window.__sentinel_last_overlay_finalScore = typeof message.finalScore === "number" ? message.finalScore : null;
-        window.__sentinel_last_overlay_rule = typeof message.appliedRule === "string" ? message.appliedRule : "";
-        window.__sentinel_last_overlay_risk_steps = Array.isArray(message.riskSteps) ? message.riskSteps : [];
-        window.__sentinel_last_overlay_api_calls = Array.isArray(message.apiCalls) ? message.apiCalls : [];
-      } catch (e) {
-        console.warn("[Sentinel] Failed to cache debug context:", e);
-      }
-
-      // Route by severity — use professional Sentinel UI for all threat levels
-      const _bgRisk = message.finalScore ?? message.score ?? 0;
-      const _bgSignals = Array.isArray(message.signals) ? message.signals : message.reasons || [];
-      const _bgLevel = message.status === "malicious" ? "danger" : "warning";
-
-      if (message.status === "malicious" || message.status === "suspicious") {
-        showSentinelAlert({ risk: _bgRisk, signals: _bgSignals, level: _bgLevel });
-        playAlertSound(message.status);
-        sendResponse({ ok: true });
-        return;
-      }
-
-      // Regular small card overlay for suspicious/safe
-      showOverlay(
-        message.status,
-        message.message,
-        message.reasons,  // Structured reasons from threat evaluator
-        message.trustScore,
-        message.educationTip,
-        message.breakdown,
-        message.aiReasoning,
-        message.finalScore || message.finalRisk,  // Accept both old and new field names
-        message.explanation
-      );
-      sendResponse({ ok: true });
-      return true; // keep message channel open for async sendResponse
-    }
-  } catch (e) {
-    console.error("[Sentinel] Message handler error:", e);
-    try {
-      sendResponse({ ok: false, error: e.message });
-    } catch {}
-  }
-  return true;
-});
-
-// Keep dev_mode in sync (lightweight)
-try {
-  chrome.storage.local.get(["dev_mode"], (d) => {
-    try {
-      _devModeEnabled = Boolean(d && d.dev_mode);
-    } catch (e) {
-      console.warn("[Sentinel] Failed to read dev_mode:", e);
-    }
-  });
-  chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local") return;
-    if (changes.dev_mode) _devModeEnabled = Boolean(changes.dev_mode.newValue);
-  });
-} catch (e) {
-  console.warn("[Sentinel] Failed to init storage listeners:", e);
-}
-
-// ─── Alert Sound ───────────────────────────────────────────────────────────
-
-function playAlert(type) {
-  if (hasPlayedAlertForPage) return;
-
-  let fileName = "";
-  let volume = 1;
-
-  if (type === "suspicious") {
-    fileName = "warning.mp3";
-    volume = 0.35;
-  } else if (type === "malicious") {
-    fileName = "danger.mp3";
-    volume = 0.85;
-  } else {
-    return;
-  }
-
-  hasPlayedAlertForPage = true;
-  const audio = new Audio(chrome.runtime.getURL(`assets/sounds/${fileName}`));
-  audio.volume = volume;
-  audio.play().catch((err) => {
-    console.warn(`[Sentinel] Failed to play ${type} alert sound:`, err);
-  });
-}
-
-// ─── Overlay Rendering ────────────────────────────────────────────────────
-
-function showOverlay(
-  status,
-  message,
-  reasons = [],
-  trustScore = null,
-  educationTip = "",
-  breakdown = null,
-  aiReasoning = null,
-  finalRiskScore = null,
-  explanation = ""
-) {
-  // Overload support for forced test-mode payload:
-  // showOverlay({ risk, reason })
-  if (status && typeof status === "object" && !Array.isArray(status)) {
-    showGuaranteedOverlay(status);
-    return;
-  }
-
-  const config = getOverlayConfig(status, message, reasons, trustScore, educationTip);
-  if (!config) return;
-
-  const overlay = ensureOverlayElement();
-  overlay.innerHTML = "";
-
-  // ── Header row: icon + title ─────────────────────────────────────────────
-  const header = document.createElement("div");
-  header.style.cssText = "display:flex;align-items:center;gap:8px;margin-bottom:8px;";
-
-  const icon = document.createElement("span");
-  icon.textContent = config.icon;
-  icon.setAttribute("aria-hidden", "true");
-  icon.style.cssText = "font-size:18px;line-height:1;flex-shrink:0;";
-
-  const title = document.createElement("div");
-  title.textContent = config.text;
-  title.style.cssText = "font-weight:700;font-size:14px;flex:1;";
-
-  header.appendChild(icon);
-  header.appendChild(title);
-
-  // ── Dismiss button (visible for suspicious and malicious) ────────────────
-  if (status !== "safe") {
-    const dismissBtn = document.createElement("button");
-    dismissBtn.textContent = "×";
-    dismissBtn.setAttribute("aria-label", "Dismiss alert");
-    dismissBtn.style.cssText = [
-      "background:rgba(255,255,255,0.25);border:none;cursor:pointer;",
-      "color:inherit;font-size:18px;line-height:1;padding:0 4px;border-radius:5px;",
-      "font-weight:700;flex-shrink:0;transition:background 120ms;",
-    ].join("");
-    dismissBtn.addEventListener("mouseenter", () => {
-      dismissBtn.style.background = "rgba(255,255,255,0.45)";
-    });
-    dismissBtn.addEventListener("mouseleave", () => {
-      dismissBtn.style.background = "rgba(255,255,255,0.25)";
-    });
-    dismissBtn.addEventListener("click", () => hideOverlay(overlay));
-    header.appendChild(dismissBtn);
-  }
-
-  overlay.appendChild(header);
-
-  // ── Trust score badge ────────────────────────────────────────────────────
-  if (typeof trustScore === "number") {
-    const scoreBadge = document.createElement("div");
-    scoreBadge.textContent = `Trust Score: ${trustScore}/100`;
-    scoreBadge.style.cssText = [
-      "display:inline-flex;padding:3px 10px;border-radius:999px;",
-      `font-size:11px;font-weight:700;margin-bottom:6px;`,
-      `background:${config.badgeBackground};color:${config.badgeColor};`,
-    ].join("");
-    overlay.appendChild(scoreBadge);
-  }
-  if (typeof finalRiskScore === "number") {
-    const riskBadge = document.createElement("div");
-    riskBadge.textContent = `Final Risk: ${Math.max(0, Math.min(100, Math.round(finalRiskScore)))}/100`;
-    riskBadge.style.cssText = [
-      "display:inline-flex;padding:3px 10px;border-radius:999px;margin-left:6px;",
-      "font-size:11px;font-weight:700;margin-bottom:6px;",
-      "background:rgba(255,255,255,0.16);color:#fff;",
-    ].join("");
-    overlay.appendChild(riskBadge);
-  }
-
-  // ── Reasons list (always shown for suspicious/malicious) ─────────────────
-  const displayReasons = Array.isArray(reasons)
-    ? reasons.filter((r) => typeof r === "string" && r.trim())
-    : [];
-
-  if (displayReasons.length > 0) {
-    const list = document.createElement("ul");
-    list.style.cssText = "margin:6px 0 0;padding-left:18px;font-size:12px;font-weight:500;";
-
-    for (const reason of displayReasons) {
-      const item = document.createElement("li");
-      item.textContent = reason;
-      item.style.marginBottom = "3px";
-      list.appendChild(item);
-    }
-    overlay.appendChild(list);
-  }
-  const normalizedAi = typeof aiReasoning === "string" ? aiReasoning.trim() : "";
-  const normalizedExplanation = typeof explanation === "string" ? explanation.trim() : "";
-  if (normalizedAi || normalizedExplanation) {
-    const aiCard = document.createElement("div");
-    aiCard.style.cssText = [
-      "margin-top:10px;padding:10px 10px;border-radius:10px;",
-      "background:rgba(255,255,255,0.10);border:1px solid rgba(255,255,255,0.2);",
-    ].join("");
-    aiCard.innerHTML = `<div style="font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;opacity:.9;">AI Reasoning</div>`;
-    const txt = document.createElement("div");
-    txt.textContent = normalizedAi || normalizedExplanation;
-    txt.style.cssText = "margin-top:6px;font-size:12px;line-height:1.4;opacity:.96;";
-    aiCard.appendChild(txt);
-    overlay.appendChild(aiCard);
-  }
-
-  // ── Developer mode panel (Part 2) ───────────────────────────────────────
-  if (_devModeEnabled) {
-    const dev = document.createElement("div");
-    dev.style.cssText = [
-      "margin-top:10px;padding:10px 10px;border-radius:10px;",
-      "background:rgba(0,0,0,0.18);border:1px solid rgba(255,255,255,0.22);",
-    ].join("");
-
-    const hdr = document.createElement("div");
-    hdr.textContent = "Developer Mode";
-    hdr.style.cssText = "font-size:10px;font-weight:900;letter-spacing:0.1em;text-transform:uppercase;opacity:0.95;";
-    dev.appendChild(hdr);
-
-    const sigs = Array.isArray(window.__sentinel_last_overlay_signals) ? window.__sentinel_last_overlay_signals : [];
-    const score = typeof window.__sentinel_last_overlay_score === "number" ? window.__sentinel_last_overlay_score : null;
-    const appliedRule = typeof window.__sentinel_last_overlay_rule === "string" ? window.__sentinel_last_overlay_rule : "";
-    const finalScore = typeof window.__sentinel_last_overlay_finalScore === "number" ? window.__sentinel_last_overlay_finalScore : null;
-    const riskSteps = Array.isArray(window.__sentinel_last_overlay_risk_steps)
-      ? window.__sentinel_last_overlay_risk_steps : [];
-    const apiCalls = Array.isArray(window.__sentinel_last_overlay_api_calls)
-      ? window.__sentinel_last_overlay_api_calls : [];
-
-    const lines = [];
-    if (sigs.length) lines.push("Signals:", ...sigs.slice(0, 12).map(s => `- ${s}`));
-    if (breakdown && typeof breakdown === "object") {
-      const b = Object.entries(breakdown).filter(([k, v]) => k && v).slice(0, 6);
-      if (b.length) lines.push("", "Breakdown:", ...b.map(([k, v]) => `- ${k}: ${v}`));
-    }
-    if (riskSteps.length) {
-      lines.push("", "Risk calculation steps:", ...riskSteps.slice(0, 8).map(s => `- ${s}`));
-    }
-    if (apiCalls.length) {
-      lines.push("", "API/Module calls:", ...apiCalls.slice(0, 8).map(s => `- ${s}`));
-    }
-    if (score !== null) lines.push("", `Score: ${score}`);
-    if (finalScore !== null) lines.push(`Final Score: ${finalScore}`);
-    if (appliedRule) lines.push(`Rule: ${appliedRule}`);
-
-    const pre = document.createElement("pre");
-    pre.textContent = lines.join("\n") || "No debug data.";
-    pre.style.cssText = "margin:8px 0 0;white-space:pre-wrap;font-size:11px;line-height:1.35;opacity:0.95;";
-    dev.appendChild(pre);
-    overlay.appendChild(dev);
-  }
-
-  // ── Structured breakdown (XAI++) ──────────────────────────────────────────
-  if (breakdown && typeof breakdown === "object") {
-    const entries = Object.entries(breakdown)
-      .filter(([k, v]) => k && v)
-      .slice(0, 4);
-
-    if (entries.length) {
-      const xai = document.createElement("div");
-      xai.style.cssText = [
-        "margin-top:10px;padding:10px 10px;border-radius:10px;",
-        "background:rgba(255,255,255,0.12);border:1px solid rgba(255,255,255,0.22);",
-      ].join("");
-
-      const hdr = document.createElement("div");
-      hdr.textContent = "Why this site was flagged";
-      hdr.style.cssText = "font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;opacity:0.9;";
-      xai.appendChild(hdr);
-
-      for (const [k, v] of entries) {
-        const row = document.createElement("div");
-        row.style.cssText = "display:flex;gap:8px;margin-top:6px;font-size:12px;line-height:1.35;";
-
-        const kk = document.createElement("div");
-        kk.textContent = k;
-        kk.style.cssText = "min-width:92px;font-weight:800;opacity:0.95;";
-
-        const vv = document.createElement("div");
-        vv.textContent = String(v);
-        vv.style.cssText = "flex:1;opacity:0.95;";
-
-        row.appendChild(kk);
-        row.appendChild(vv);
-        xai.appendChild(row);
-      }
-
-      overlay.appendChild(xai);
-    }
-  }
-
-  // ── Education tip ────────────────────────────────────────────────────────
-  const normalizedTip = typeof educationTip === "string" ? educationTip.trim() : "";
-  if (normalizedTip) {
-    const tipCard = document.createElement("div");
-    tipCard.style.cssText = [
-      `margin-top:8px;padding:8px 10px;border-radius:8px;`,
-      `background:${config.tipBackground};color:${config.tipColor};`,
-    ].join("");
-
-    const tipLabel = document.createElement("div");
-    tipLabel.textContent = "Safety Tip";
-    tipLabel.style.cssText = "font-size:10px;font-weight:700;letter-spacing:0.05em;text-transform:uppercase;";
-
-    const tipText = document.createElement("div");
-    tipText.textContent = normalizedTip;
-    tipText.style.cssText = "margin-top:3px;font-size:12px;font-weight:500;";
-
-    tipCard.appendChild(tipLabel);
-    tipCard.appendChild(tipText);
-    overlay.appendChild(tipCard);
-  }
-
-  // ── Apply theme ───────────────────────────────────────────────────────────
-  overlay.style.background = config.background;
-  overlay.style.color = config.color;
-  overlay.style.boxShadow = config.shadow;
-  overlay.style.pointerEvents = status !== "safe" ? "auto" : "none";
-
-  // ── Animate in ────────────────────────────────────────────────────────────
-  if (overlayHideTimeoutId) {
-    clearTimeout(overlayHideTimeoutId);
-    overlayHideTimeoutId = null;
-  }
-
-  overlay.style.display = "block";
-  overlay.style.opacity = "0";
-  overlay.style.transform = "translateY(-10px) scale(0.97)";
-
-  requestAnimationFrame(() => {
-    overlay.style.opacity = "1";
-    overlay.style.transform = "translateY(0) scale(1)";
-  });
-
-  // ── Auto-hide (safe/suspicious only) ─────────────────────────────────────
-  if (config.autoHideMs) {
-    overlayHideTimeoutId = window.setTimeout(() => hideOverlay(overlay), config.autoHideMs);
-  }
-}
-
-function hideOverlay(overlay) {
-  overlay.style.opacity = "0";
-  overlay.style.transform = "translateY(-10px) scale(0.97)";
-  window.setTimeout(() => {
-    if (overlayElement === overlay) {
-      overlay.style.display = "none";
-    }
-  }, 220);
-}
-
-// ─── Danger Overlay (CYBERSECURITY STYLE) ─────────────────────────────────
-
-/**
- * FULL-SCREEN DANGER OVERLAY (v3.1)
- * 
- * Shows an aggressive red terminal-style alert for MALICIOUS verdicts.
- * Features:
- *   • Full-screen red overlay with 95% opacity (blocks interaction)
- *   • Flicker animation (60–120ms pulse)
- *   • Terminal monospace font + text-shadow glow
- *   • Two action buttons: "Leave Site" (primary) + "Proceed Anyway" (risky)
- *   • Risk score display (0-100)
- *   • Audio alert (alarm.mp3)
- * 
- * @param {object} result - Detection result with status, risk, signals
- */
-function showDangerOverlay(result) {
-  // Create the full-screen container
-  const overlay = document.createElement("div");
-  overlay.id = "sentinel-danger-overlay";
-  overlay.setAttribute("role", "dialog");
-  overlay.setAttribute("aria-modal", "true");
-  overlay.setAttribute("aria-labelledby", "sentinel-danger-title");
-
-  // Inject cybersecurity-style CSS if not already present
-  if (!document.getElementById("sentinel-danger-styles")) {
-    const styleEl = document.createElement("style");
-    styleEl.id = "sentinel-danger-styles";
-    styleEl.textContent = `
-      #sentinel-danger-overlay {
-        position: fixed !important;
-        top: 0 !important;
-        left: 0 !important;
-        width: 100% !important;
-        height: 100% !important;
-        background: rgba(0, 0, 0, 0.95) !important;
-        color: #ff0000 !important;
-        z-index: 2147483647 !important;
-        display: flex !important;
-        flex-direction: column !important;
-        justify-content: center !important;
-        align-items: center !important;
-        font-family: "Courier New", "Lucida Console", monospace !important;
-        text-shadow: 0 0 5px #ff0000, 0 0 10px rgba(255, 0, 0, 0.5) !important;
-        animation: sentinel-flicker 0.8s infinite !important;
-        padding: 20px !important;
-        overflow-y: auto !important;
-      }
-
-      @keyframes sentinel-flicker {
-        0% { opacity: 1; }
-        5% { opacity: 0.8; }
-        10% { opacity: 1; }
-        15% { opacity: 0.85; }
-        20% { opacity: 1; }
-        100% { opacity: 1; }
-      }
-
-      .sentinel-danger-box {
-        border: 3px solid #ff0000 !important;
-        padding: 40px !important;
-        text-align: center !important;
-        max-width: 500px !important;
-        background: rgba(0, 0, 0, 0.7) !important;
-        border-radius: 8px !important;
-        box-shadow: 0 0 20px rgba(255, 0, 0, 0.4), inset 0 0 20px rgba(255, 0, 0, 0.1) !important;
-      }
-
-      .sentinel-danger-icon {
-        font-size: 60px !important;
-        margin-bottom: 20px !important;
-        animation: sentinel-pulse 1.2s ease-in-out infinite !important;
-      }
-
-      @keyframes sentinel-pulse {
-        0%, 100% { transform: scale(1); opacity: 1; }
-        50% { transform: scale(1.1); opacity: 0.9; }
-      }
-
-      .sentinel-danger-title {
-        font-size: 28px !important;
-        font-weight: bold !important;
-        margin: 0 0 12px !important;
-        letter-spacing: 2px !important;
-        text-transform: uppercase !important;
-      }
-
-      .sentinel-danger-subtitle {
-        font-size: 14px !important;
-        margin: 0 0 20px !important;
-        opacity: 0.9 !important;
-        letter-spacing: 1px !important;
-      }
-
-      .sentinel-danger-risk {
-        font-size: 18px !important;
-        font-weight: bold !important;
-        margin: 20px 0 !important;
-        padding: 12px !important;
-        background: rgba(255, 0, 0, 0.1) !important;
-        border: 1px solid #ff0000 !important;
-        border-radius: 4px !important;
-      }
-
-      .sentinel-danger-risk-value {
-        font-size: 32px !important;
-        color: #ff3333 !important;
-        letter-spacing: 3px !important;
-      }
-
-      .sentinel-danger-signals {
-        font-size: 12px !important;
-        margin: 16px 0 !important;
-        text-align: left !important;
-        background: rgba(0, 0, 0, 0.4) !important;
-        padding: 12px !important;
-        border-left: 2px solid #ff0000 !important;
-        max-height: 120px !important;
-        overflow-y: auto !important;
-        line-height: 1.6 !important;
-      }
-
-      .sentinel-danger-signals strong {
-        color: #ff3333 !important;
-      }
-
-      .sentinel-danger-actions {
-        display: flex !important;
-        gap: 12px !important;
-        margin-top: 24px !important;
-        justify-content: center !important;
-        flex-wrap: wrap !important;
-      }
-
-      .sentinel-danger-btn {
-        padding: 12px 28px !important;
-        border: 2px solid #ff0000 !important;
-        border-radius: 4px !important;
-        background: rgba(255, 0, 0, 0.1) !important;
-        color: #ff0000 !important;
-        font-family: "Courier New", monospace !important;
-        font-size: 14px !important;
-        font-weight: bold !important;
-        cursor: pointer !important;
-        text-transform: uppercase !important;
-        letter-spacing: 1px !important;
-        transition: all 200ms !important;
-      }
-
-      .sentinel-danger-btn:hover {
-        background: #ff0000 !important;
-        color: #000 !important;
-        box-shadow: 0 0 10px rgba(255, 0, 0, 0.6) !important;
-      }
-
-      .sentinel-danger-btn-primary {
-        background: rgba(255, 0, 0, 0.2) !important;
-      }
-
-      .sentinel-danger-btn-primary:hover {
-        background: #ff0000 !important;
-      }
-
-      .sentinel-danger-footer {
-        font-size: 10px !important;
-        margin-top: 20px !important;
-        opacity: 0.6 !important;
-        letter-spacing: 1px !important;
-        text-transform: uppercase !important;
-      }
-    `;
-    document.head?.appendChild(styleEl) || document.documentElement.appendChild(styleEl);
-  }
-
-  // Build the danger box content
-  const riskScore = Math.max(0, Math.min(100, Math.round(result.finalRiskScore || result.risk || 0)));
-  const signals = Array.isArray(result.signals) ? result.signals.slice(0, 5) : [];
-
-  overlay.innerHTML = `
-    <div class="sentinel-danger-box">
-      <div class="sentinel-danger-icon">🚨</div>
-      <div class="sentinel-danger-title" id="sentinel-danger-title">SECURITY WARNING</div>
-      <div class="sentinel-danger-subtitle">DANGEROUS SITE DETECTED</div>
-      
-      <div class="sentinel-danger-risk">
-        RISK LEVEL: <span class="sentinel-danger-risk-value">${riskScore}/100</span>
-      </div>
-
-      ${signals.length > 0 ? `
-        <div class="sentinel-danger-signals">
-          <strong>THREATS DETECTED:</strong><br>
-          ${signals.map(s => `• ${String(s).toUpperCase()}`).join('<br>')}
-        </div>
-      ` : ''}
-
-      <div class="sentinel-danger-subtitle" style="margin-top: 16px;">
-        This site is known to be malicious. Proceed at your own risk.
-      </div>
-
-      <div class="sentinel-danger-actions">
-        <button id="sentinel-leave-site" class="sentinel-danger-btn sentinel-danger-btn-primary">
-          ← LEAVE SITE
-        </button>
-        <button id="sentinel-continue-anyway" class="sentinel-danger-btn">
-          PROCEED ANYWAY
-        </button>
-      </div>
-
-      <div class="sentinel-danger-footer">
-        Powered by Sentinel Security Extension
-      </div>
-    </div>
-  `;
-
-  // Attach to DOM
-  const root = document.body || document.documentElement;
-  root.appendChild(overlay);
-
-  // Button handlers
-  const leaveBtn = document.getElementById("sentinel-leave-site");
-  if (leaveBtn) {
-    leaveBtn.addEventListener("click", () => {
-      window.location.href = "https://www.google.com";
-    });
-  }
-
-  const continueBtn = document.getElementById("sentinel-continue-anyway");
-  if (continueBtn) {
-    continueBtn.addEventListener("click", () => {
-      overlay.style.display = "none";
-      // Update bypass in background
-      try {
-        chrome.runtime.sendMessage({
-          type: "sentinel:bypass-url",
-          url: window.location.href,
-        }).catch(() => {});
-      } catch {}
-    });
-  }
-
-  // Play danger alarm sound
-  playAlertSound("malicious");
-}
-
-/**
- * Enhanced alert sound playback (v3.1)
- * Supports: malicious (danger.mp3), suspicious (warning.mp3), safe (safe.mp3)
- */
-function playAlertSound(level) {
-  const volumeMap = {
-    malicious: 0.75,
-    suspicious: 0.5,
-    safe: 0.3,
-  };
-
-  const fileMap = {
-    malicious: "danger.mp3",
-    suspicious: "warning.mp3",
-    safe: "safe.mp3",
-  };
-
-  const volume = volumeMap[level] || 0.5;
-  const fileName = fileMap[level] || "warning.mp3";
-
-  try {
-    const audio = new Audio(chrome.runtime.getURL(`assets/sounds/${fileName}`));
-    audio.volume = volume;
-    audio.play().catch(() => {});
-  } catch (e) {
-    console.warn(`[Sentinel] Failed to play ${level} sound:`, e);
-  }
-}
-
-function ensureOverlayElement() {
-  if (overlayElement && document.contains(overlayElement)) return overlayElement;
-
-  overlayElement = document.createElement("div");
-  overlayElement.id = "sentinel-status-overlay";
-  overlayElement.setAttribute("role", "status");
-  overlayElement.setAttribute("aria-live", "polite");
-
-  overlayElement.style.cssText = [
-    "position:fixed;top:16px;right:16px;z-index:2147483647;",
-    "max-width:300px;min-width:270px;padding:12px 14px;",
-    "border-radius:14px;",
-    'font-family:"Segoe UI",Arial,sans-serif;',
-    "font-size:14px;font-weight:600;line-height:1.4;letter-spacing:0.01em;",
-    "backdrop-filter:blur(8px);",
-    "border:1px solid rgba(255,255,255,0.3);",
-    "opacity:0;transform:translateY(-10px) scale(0.97);",
-    "transition:opacity 220ms ease,transform 220ms ease;",
-    "display:none;",
-  ].join("");
-
-  const root = document.body || document.documentElement;
-  root.appendChild(overlayElement);
-  return overlayElement;
-}
-
-// ─── Overlay Config per Status ────────────────────────────────────────────
-
-function getOverlayConfig(status, message, reasons, trustScore, educationTip) {
-  if (status === "safe") {
-    return {
-      icon: "✅",
-      text: message || "Safe Website",
-      trustScore,
-      educationTip: "",
-      background: "rgba(16, 120, 64, 0.96)",
-      color: "#f0fff4",
-      badgeBackground: "rgba(255,255,255,0.2)",
-      badgeColor: "#f0fff4",
-      tipBackground: "rgba(255,255,255,0.12)",
-      tipColor: "#f0fff4",
-      shadow: "0 10px 28px rgba(16,120,64,0.28)",
-      autoHideMs: 3000,
-    };
-  }
-
-  if (status === "suspicious") {
-    return {
-      icon: "⚠️",
-      text: message || "Suspicious Activity Detected",
-      trustScore,
-      educationTip,
-      background: "rgba(217, 158, 11, 0.97)",
-      color: "#2b1d00",
-      badgeBackground: "rgba(255,255,255,0.55)",
-      badgeColor: "#2b1d00",
-      tipBackground: "rgba(255,255,255,0.6)",
-      tipColor: "#3a2b00",
-      shadow: "0 10px 28px rgba(180,120,0,0.28)",
-      autoHideMs: 7000,
-    };
-  }
-
-  if (status === "malicious") {
-    return {
-      icon: "🚫",
-      text: message || "Malicious Site Blocked",
-      trustScore,
-      educationTip,
-      background: "rgba(180, 24, 30, 0.97)",
-      color: "#fff5f5",
-      badgeBackground: "rgba(255,255,255,0.18)",
-      badgeColor: "#fff5f5",
-      tipBackground: "rgba(255,255,255,0.15)",
-      tipColor: "#fff5f5",
-      shadow: "0 12px 32px rgba(140,10,14,0.36)",
-      autoHideMs: 0, // never auto-hide — user must dismiss
-    };
-  }
-
-  return null;
-}
-
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 7 — PHISHING UI SCANNER  (Part 2)
-// ══════════════════════════════════════════════════════════════════════
-//
-// Scans the loaded DOM for password, OTP, and credit-card inputs.
-// If found on a suspicious or low-trust domain, shows a ⚠️ overlay.
-// Runs once at document_idle; re-runs on SPA route changes.
-
-/**
- * Detects which sensitive input categories are present in the page DOM.
- * @returns {{ hasPassword: boolean, hasOTP: boolean, hasCreditCard: boolean, hasCVV: boolean, hasFakeLogin: boolean }}
- */
-function detectSensitiveInputTypes() {
-  const inputs = Array.from(document.querySelectorAll("input"));
-
-  const hasPassword = inputs.some(el =>
-    el.type === "password" ||
-    /pass(word)?/i.test(`${el.name}${el.id}${el.placeholder}`)
-  );
-
-  // OTP: explicit autocomplete OR four-plus single-character inputs
-  const singleChar = inputs.filter(el => el.maxLength === 1 && el.type !== "hidden");
-  const hasOTP = singleChar.length >= 4 || inputs.some(el =>
-    el.autocomplete === "one-time-code" ||
-    (el.inputMode === "numeric" && /otp|code|verif/i.test(`${el.name}${el.id}`))
-  );
-
-  // Credit card: autocomplete cc-* or field name patterns
-  const hasCC = inputs.some(el => {
-    const hint = `${el.autocomplete}${el.name}${el.id}`.toLowerCase();
-    return hint.startsWith("cc-") || /card.?number|creditcard|cc.?num/i.test(hint);
-  });
-  const hasCVV = inputs.some(el => {
-    const hint = `${el.autocomplete}${el.name}${el.id}${el.placeholder}`.toLowerCase();
-    return /cvv|cvc|security.?code/.test(hint);
-  });
-  const hasFakeLogin = (() => {
-    const forms = Array.from(document.querySelectorAll("form"));
-    return forms.some((f) => {
-      const pw = f.querySelector('input[type="password"]');
-      const user = f.querySelector('input[type="email"],input[name*="user" i],input[name*="login" i],input[name*="email" i]');
-      const urgentCopy = /(verify|suspended|unlock|urgent|confirm|security check)/i.test(f.textContent || "");
-      return Boolean(pw && (user || urgentCopy));
-    });
-  })();
-
-  return { hasPassword, hasOTP, hasCreditCard: hasCC, hasCVV, hasFakeLogin };
-}
-
-/**
- * Fetches the background's cached analysis for the current page.
- * Returns null if unavailable (SW sleeping, first visit, etc.).
- * @returns {Promise<object|null>}
- */
-function getPageAnalysis() {
-  return new Promise(resolve => {
-    try {
-      chrome.runtime.sendMessage({ type: "sentinel:get-analysis" }, response => {
-        // FIX: response?.result is a plain object, NOT a Promise — calling .catch() on it throws.
-        if (chrome.runtime.lastError) {
-          resolve(null);
-          return;
-        }
-        resolve(response?.result ?? null);
-      });
-    } catch {
-      resolve(null);
-    }
-  });
-}
-
-/**
- * Runs the phishing UI scan and shows an overlay if warranted.
- * 
- * CRITICAL (v2.1): Only flag login forms on untrusted domains with other indicators
- * DO NOT flag on trusted domains (google.com, microsoft.com, etc.)
- * 
- * @param {object|null} [cachedAnalysis] — reuse a previously fetched result
- */
-async function runPhishingUIScanner(cachedAnalysis = null) {
-  if (["chrome-extension:", "chrome:", "about:"].includes(location.protocol)) return;
-
-  const { hasPassword, hasOTP, hasCreditCard, hasCVV, hasFakeLogin } = detectSensitiveInputTypes();
-  if (!hasPassword && !hasOTP && !hasCreditCard && !hasCVV && !hasFakeLogin) return;
-
-  const analysis   = cachedAnalysis ?? await getPageAnalysis();
-  if (!analysis) return;
-
-  const host = String(location.hostname || "").toLowerCase();
-  const TRUSTED_DOMAINS = ["google.com", "microsoft.com", "apple.com", "amazon.com", "edu", "gov"];
-  const isTrustedDomain = TRUSTED_DOMAINS.some(domain => (
-    domain === "edu" || domain === "gov"
-      ? host.endsWith(`.${domain}`)
-      : host === domain || host.endsWith(`.${domain}`)
-  ));
-
-  const signalList = Array.isArray(analysis?.signals) ? analysis.signals.map(s => String(s).toLowerCase()) : [];
-  const hasBrandMismatch = signalList.some(s => s.includes("brand in subdomain") || s.includes("brandplacement") || s.includes("brand typosquatting"));
-  const hasSuspiciousKeyword = signalList.some(s => s.includes("keyword") || s.includes("intent") || s.includes("login") || s.includes("verify") || s.includes("secure") || s.includes("update"));
-  const hasHighRiskTLD = signalList.some(s => s.includes("tldriskhigh") || s.includes("high-risk tld"));
-  const hasSuspiciousIndicators = hasBrandMismatch || hasSuspiciousKeyword || hasHighRiskTLD;
-
-  // ── CRITICAL: Trusted domains are SAFE — no warning ──────────────────
-  if (analysis.status === "safe" || isTrustedDomain) {
-    console.log("[Sentinel AI] Signal: login_form");
-    console.log("[Sentinel AI] Trusted: true");
-    console.log("[Sentinel AI] Action: ignored");
-    console.debug(`[Sentinel] ✅ Login form on trusted domain — skipping warning`);
-    return;
-  }
-
-  const isSuspicious = analysis.status === "suspicious";
-  const isLowTrust   = typeof analysis.trustScore === "number" && analysis.trustScore < 45;
-  if (!isSuspicious && !isLowTrust) {
-    console.log("[Sentinel AI] Signal: login_form");
-    console.log(`[Sentinel AI] Trusted: ${isTrustedDomain}`);
-    console.log("[Sentinel AI] Action: ignored");
-    return;
-  }
-
-  if (!(hasPassword && !isTrustedDomain && hasSuspiciousIndicators)) {
-    console.log("[Sentinel AI] Signal: login_form");
-    console.log(`[Sentinel AI] Trusted: ${isTrustedDomain}`);
-    console.log("[Sentinel AI] Action: ignored");
-    return;
-  }
-
-  const fieldTypes = [
-    hasPassword   && "password",
-    hasOTP        && "OTP / verification code",
-    hasCreditCard && "credit card",
-    hasCVV        && "CVV / card security code",
-  ].filter(Boolean);
-
-  const fieldList  = fieldTypes.join(", ");
-  const trustLabel = typeof analysis.trustScore === "number"
-    ? `${analysis.trustScore}/100` : "unverified";
-
-  // ── UPDATED MESSAGE (v2.1): Be specific about what we detected ────────
-  let overlayMessage = "⚠️ Sensitive fields detected";
-  if (hasPassword && !hasCreditCard && !hasCVV && !hasOTP) {
-    // Only password field - use non-alarming message
-    overlayMessage = "⚠️ Login form detected — verifying legitimacy...";
-  } else if (hasCreditCard || hasCVV) {
-    // Financial data - strong warning
-    overlayMessage = "🚫 Financial data field on low-trust domain";
-  }
-
-  console.warn(`[Sentinel] Phishing UI Scanner: ${overlayMessage} (trust: ${trustLabel})`);
-  console.log("[Sentinel AI] Signal: login_form");
-  console.log(`[Sentinel AI] Trusted: ${isTrustedDomain}`);
-  console.log("[Sentinel AI] Action: alerted");
-
-  showOverlay(
-    "suspicious",
-    overlayMessage,
-    [
-      `This page is collecting: ${fieldList}`,
-      `Domain trust score: ${trustLabel}`,
-      hasFakeLogin ? "⚠️ Login form pattern detected" : "Sensitive field pattern confirmed",
-      "Verify this is a legitimate site before submitting any data",
-    ],
-    analysis.trustScore ?? null,
-    `Never enter ${fieldList} data unless certain of this site's identity. Legitimate companies will never ask for passwords via email.`,
-    analysis?.breakdown || null,
-    analysis?.aiReasoning || null,
-    analysis?.finalRiskScore ?? null,
-    analysis?.explanation || ""
-  );
-
-  // Emit phishing UI signal once per page-load.
-  if (!_phishingUiAlertSent) {
-    _phishingUiAlertSent = true;
-    try {
-      chrome.runtime.sendMessage({
-        type:      "BEHAVIOR_ALERT",
-        event:     "phishing_detected",
-        severity:  hasFakeLogin ? "high" : "medium",
-        confidence: hasFakeLogin ? "HIGH" : "MEDIUM",
-        url:       location.href,
-        details:   { hasPassword, hasOTP, hasCreditCard, hasCVV, hasFakeLogin },
-        timestamp: Date.now(),
-      }).catch(() => {});
-    } catch {}
-  }
-}
-
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 8 — PERSONAL DATA PROTECTION  (Part 3)
-// ══════════════════════════════════════════════════════════════════════
-//
-// Monitors actual keystrokes in sensitive fields in real time.
-// Only activates on risky domains — silently no-ops on safe sites.
-// Fires once per page load to avoid alert fatigue.
-
-/** Matches exactly 16 digits with optional separating spaces or dashes. */
-const _CARD_PATTERN = /^[\s\-]*(\d[\s\-]*){16}$/;
-
-let _sensitiveAlertFired = false;
-let _cachedPageAnalysis  = null; // shared with phishing scanner below
-
-/**
- * Shows a real-time warning when sensitive data entry is detected.
- * @param {string} fieldType — e.g. "password", "credit card number"
- * @param {object|null} analysis
- */
-function fireSensitiveDataAlert(fieldType, analysis) {
-  if (_sensitiveAlertFired) return;
-  _sensitiveAlertFired = true;
-
-  const trustScore = analysis?.trustScore ?? null;
-  const finalRisk = typeof analysis?.finalRiskScore === "number"
-    ? analysis.finalRiskScore
-    : (typeof trustScore === "number" ? (100 - trustScore) : 0);
-  const isHighPriority = finalRisk >= 65 || (typeof trustScore === "number" && trustScore < 35);
-
-  showOverlay(
-    isHighPriority ? "malicious" : "suspicious",
-    `${isHighPriority ? "HIGH PRIORITY" : "⚠️"} Entering ${fieldType} on a risky site`,
-    [
-      `You are typing ${fieldType} data on this page`,
-      trustScore !== null ? `Domain trust score: ${trustScore}/100` : "Domain trust unverified",
-      "Stop — verify this site before continuing",
-    ],
-    trustScore,
-    trustScore !== null && trustScore < 30
-      ? "This domain has a very low trust score. Stop immediately."
-      : "Pause and verify the URL before submitting.",
-    analysis?.breakdown || null,
-    analysis?.aiReasoning || null,
-    finalRisk,
-    analysis?.explanation || ""
-  );
-
-  // Report to background — logged to history, contributes to reputation
-  try {
-    chrome.runtime.sendMessage({
-      type:      "BEHAVIOR_ALERT",
-      event:     "sensitive_data_entry",
-      severity:  "high",
-      url:       location.href,
-      details:   { fieldType },
-      timestamp: Date.now(),
-    }).catch(() => {});
-  } catch {}
-}
-
-/**
- * Attaches a delegated real-time input listener.
- * Only called when domain is already flagged as risky.
- * @param {object|null} analysis
- */
-function monitorSensitiveInputs(analysis) {
-  if (["chrome-extension:", "chrome:", "about:"].includes(location.protocol)) return;
-
-  const isRisky = analysis?.status === "suspicious" ||
-                  (typeof analysis?.trustScore === "number" && analysis.trustScore < 45);
-  if (!isRisky) return;
-
-  document.addEventListener("input", (event) => {
-    if (_sensitiveAlertFired) return;
-    const el = event.target;
-    if (!(el instanceof HTMLInputElement)) return;
-
-    if (el.type === "password") {
-      fireSensitiveDataAlert("password", analysis);
-      return;
-    }
-
-    // Card number: 16 contiguous digits (spaces/dashes allowed)
-    const raw = (el.value || "").replace(/[\s\-]/g, "");
-    if (raw.length >= 16 && /^\d{16}$/.test(raw)) {
-      const hint = `${el.autocomplete}${el.name}${el.id}`.toLowerCase();
-      if (!/(phone|zip|postal|tel|fax)/.test(hint)) {
-        fireSensitiveDataAlert("credit card number", analysis);
-      }
-    }
-  }, { capture: true, passive: true });
-}
-
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 9 — INITIALIZATION
-// ══════════════════════════════════════════════════════════════════════
-
-(function initBehaviorDetection() {
-  if (["chrome-extension:", "chrome:", "about:"].includes(location.protocol)) return;
-
-  // Fetch analysis once; share between phishing scanner and input monitor
-  getPageAnalysis().then(analysis => {
-    _cachedPageAnalysis = analysis;
-    runPhishingUIScanner(analysis).catch(() => {});
-    monitorSensitiveInputs(analysis);
-  }).catch(() => {});
-
-  // SPA re-scan: re-run phishing scanner when DOM changes significantly,
-  // debounced to avoid hammering during rapid React/Vue renders.
-  // Input monitor uses document-level delegation so it auto-covers new fields.
-  let _rescanTimer = null;
-  const _rescanObserver = new MutationObserver(() => {
-    clearTimeout(_rescanTimer);
-    _rescanTimer = setTimeout(() => {
-      runPhishingUIScanner(_cachedPageAnalysis).catch(() => {});
-    }, 1500);
-  });
-
-  const _root = document.body || document.documentElement;
-  if (_root) _rescanObserver.observe(_root, { childList: true, subtree: true });
-})();
-
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 10 — ANTI-SCAM CONTENT SCANNER  (Part 3)
-// ══════════════════════════════════════════════════════════════════════
-//
-// Scans the visible page text for scam/social-engineering keywords.
-// Keywords are loaded from chrome.storage.local (placed there by
-// background.js when it fetches threatIntel.json at startup).
-//
-// Fallback: a hardcoded minimal set is always available so the scanner
-// works even before the background has written to storage.
-
-/** Minimal built-in scam keywords — always available without storage read. */
-const _BUILTIN_SCAM_KEYWORDS = [
-  "you have won", "you won", "congratulations you",
-  "free reward", "claim your reward",
-  "free crypto", "free bitcoin",
-  "urgent action required", "act immediately",
-  "limited time offer", "offer expires today",
-  "your account suspended", "account will be closed",
-  "your device has virus", "malware detected",
-  "call microsoft", "call apple support",
-  // Advanced scam / fake support phrases (Phase 3 upgrade)
-  "your system is infected", "your computer is infected",
-  "call support now", "call tech support",
-  "send bitcoin", "send btc", "pay with bitcoin",
-  "wallet address", "crypto wallet",
-  "make money fast", "earn from home",
-  "lucky winner", "you are the winner",
-];
-
-let _scamScanDone = false;
-
-/**
- * Extracts normalized visible text from the page body.
- * Skips script, style, and noscript nodes.
- * @returns {string}
- */
-function getVisiblePageText() {
-  const walker = document.createTreeWalker(
-    document.body || document.documentElement,
-    NodeFilter.SHOW_TEXT,
-    {
-      acceptNode(node) {
-        const parent = node.parentElement?.tagName?.toLowerCase();
-        if (["script", "style", "noscript", "template"].includes(parent)) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    }
-  );
-
-  const chunks = [];
-  let node;
-  while ((node = walker.nextNode())) {
-    const t = node.textContent?.trim();
-    if (t && t.length > 2) chunks.push(t);
-    if (chunks.length > 400) break; // cap at ~400 text nodes for performance
-  }
-  return chunks.join(" ").toLowerCase();
-}
-
-/**
- * Scans page text against the loaded threat intel keyword list.
- * Shows overlay if a keyword is found on a low-trust/suspicious domain.
- *
- * @param {object|null} analysis — cached page analysis from background
- * @param {string[]} keywords  — combined built-in + storage keywords
- */
-async function runScamContentScanner(analysis, keywords) {
-  if (["chrome-extension:", "chrome:", "about:"].includes(location.protocol)) return;
-  if (_scamScanDone) return;
-
-  // "Domain not trusted" = not a hard-override trusted root domain.
-  const isTrustedRoot = analysis?.score === -5 && Array.isArray(analysis?.signals) &&
-    analysis.signals.includes("Trusted domain");
-  if (isTrustedRoot) return;
-
-  // Wait for body to be available (called at document_idle so usually instant)
-  if (!document.body) return;
-
-  // Lightweight gating: if the site wasn't already risky, do a fast short scan first.
-  const isRisky = analysis?.status === "suspicious" ||
-                  (typeof analysis?.trustScore === "number" && analysis.trustScore < 55) ||
-                  analysis?.status === "malicious";
-
-  if (!isRisky) {
-    const quick = String(document.body.innerText || "").toLowerCase().slice(0, 8000);
-    const mustHave = ["you won", "free reward", "urgent action", "limited time"];
-    if (!mustHave.some(p => quick.includes(p))) return;
-  }
-
-  const pageText = getVisiblePageText();
-  if (!pageText) return;
-
-  let matchedKeyword = null;
-  for (const kw of keywords) {
-    if (pageText.includes(kw.toLowerCase())) {
-      matchedKeyword = kw;
-      break;
-    }
-  }
-
-  if (!matchedKeyword) return;
-  _scamScanDone = true;
-
-  const trustScore = analysis?.trustScore ?? null;
-
-  showOverlay(
-    "suspicious",
-    "⚠️ Potential scam detected on this page",
-    [
-      `Scam phrase found: "${matchedKeyword}"`,
-      trustScore !== null ? `Domain trust score: ${trustScore}/100` : "Domain trust unverified",
-      "Do not provide personal information or make payments",
-    ],
-    trustScore,
-    "Scam pages often use urgency, prize claims, or threat language to manipulate you. Close this page.",
-    analysis?.breakdown || {
-      "Domain Trust": "Not a trusted domain",
-      "Behavior": "No suspicious behavior",
-      "Content": `Scam keywords found: "${matchedKeyword}"`,
-      "Technical": "No technical anomalies",
-    }
-  );
-
-  // Report to background for history logging (Phase 3: scamAdvanced)
-  try {
-    chrome.runtime.sendMessage({
-      type:      "BEHAVIOR_ALERT",
-      event:     "scam_content_detected",
-      severity:  "high",
-      url:       location.href,
-      details:   { keyword: matchedKeyword, scamAdvanced: true },
-      timestamp: Date.now(),
-    }).catch(() => {});
-  } catch {}
-}
-
-// ── Initialization: load keywords from storage then scan ────────────────
-
-(function initScamScanner() {
-  if (["chrome-extension:", "chrome:", "about:"].includes(location.protocol)) return;
-
-  // Load dynamic keywords from storage + merge with built-ins
-  chrome.storage.local.get("sentinel_threat_intel_keywords", (stored) => {
-    try {
-      const dynamic = Array.isArray(stored?.sentinel_threat_intel_keywords)
-        ? stored.sentinel_threat_intel_keywords
-        : [];
-      // De-duplicate: built-ins first, then dynamic additions
-      const allKeywords = [...new Set([..._BUILTIN_SCAM_KEYWORDS, ...dynamic])];
-
-      // Reuse the cached analysis already fetched by initBehaviorDetection
-      // (Section 9). In case it's not ready yet, do a fresh getPageAnalysis().
-      const scanFn = (analysis) => runScamContentScanner(analysis, allKeywords).catch(() => {});
-
-      if (_cachedPageAnalysis !== null) {
-        scanFn(_cachedPageAnalysis);
-      } else {
-        getPageAnalysis().then(scanFn).catch(() => {});
-      }
-    } catch (e) {
-      console.warn("[Sentinel] Failed to run scam scanner:", e);
-    }
-  });
-})();
-
-
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 10b — BASIC DEOBFUSCATOR FOR INLINE SCRIPTS (Part 3)
-// ══════════════════════════════════════════════════════════════════════
-
-function _decodeBase64Token(token) {
-  try {
-    const decoded = atob(token);
-    return typeof decoded === "string" ? decoded.toLowerCase() : "";
-  } catch {
-    return "";
-  }
-}
-
-function _decodeHexEscapes(text) {
-  try {
-    return String(text || "")
-      .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
-      .toLowerCase();
-  } catch {
-    return "";
-  }
-}
-
-function _detectSuspiciousDecodedText(decodedText) {
-  const normalized = String(decodedText || "").toLowerCase();
-  if (!normalized) return "";
-
-  const phrases = [
-    "login", "verify", "password", "account suspended",
-    "your system is infected", "call support now", "call tech support",
-    "send bitcoin", "crypto wallet", "wallet address", "urgent action",
-    ..._BUILTIN_SCAM_KEYWORDS,
-  ];
-
-  for (const p of phrases) {
-    if (p && normalized.includes(String(p).toLowerCase())) return p;
-  }
-  return "";
-}
-
-function runScriptDeobfuscationScanner() {
-  if (_decodedScriptAlertFired) return;
-  if (["chrome-extension:", "chrome:", "about:"].includes(location.protocol)) return;
-
-  const scripts = Array.from(document.querySelectorAll("script")).slice(0, 60);
-  let matched = "";
-
-  for (const scriptEl of scripts) {
-    const scriptText = String(scriptEl.textContent || "");
-    if (!scriptText) continue;
-
-    const base64Regex = /atob\(\s*["'`]([A-Za-z0-9+/=]{8,400})["'`]\s*\)/g;
-    let b64;
-    while ((b64 = base64Regex.exec(scriptText)) !== null) {
-      const decoded = _decodeBase64Token(b64[1]);
-      matched = _detectSuspiciousDecodedText(decoded);
-      if (matched) break;
-    }
-    if (matched) break;
-
-    const hexRegex = /(?:\\x[0-9a-fA-F]{2}){4,}/g;
-    const hexHits = scriptText.match(hexRegex) || [];
-    for (const h of hexHits) {
-      const decodedHex = _decodeHexEscapes(h);
-      matched = _detectSuspiciousDecodedText(decodedHex);
-      if (matched) break;
-    }
-    if (matched) break;
-  }
-
-  if (!matched) return;
-  _decodedScriptAlertFired = true;
-
-  try {
-    chrome.runtime.sendMessage({
-      type: "BEHAVIOR_ALERT",
-      event: "decoded_suspicious_content",
-      severity: "high",
-      url: location.href,
-      details: { matchedText: matched },
-      timestamp: Date.now(),
-    }).catch(() => {});
-  } catch {}
-}
-
-(function initScriptDeobfuscationScanner() {
-  if (document.readyState === "complete" || document.readyState === "interactive") {
-    runScriptDeobfuscationScanner();
-  } else {
-    window.addEventListener("DOMContentLoaded", () => runScriptDeobfuscationScanner(), { once: true });
-  }
-})();
-
-
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 11 — NETWORK ACTIVITY MONITOR (Part 4)
-// ══════════════════════════════════════════════════════════════════════
-
-function _safeParseUrl(u) {
-  try { return new URL(u, location.href); } catch { return null; }
-}
-
-function _getRootDomain(hostname) {
-  if (!hostname) return "";
-  const parts = hostname.split(".").filter(Boolean);
-  if (parts.length <= 2) return hostname;
-  const DOUBLE_TLDS = new Set([
-    "co.uk", "co.in", "co.nz", "co.jp", "co.za",
-    "com.au", "com.br", "com.sg", "com.my", "com.hk",
-    "gov.uk", "gov.in", "gov.au", "gov.sg",
-    "org.uk", "net.uk", "ac.uk", "edu.au",
-  ]);
-  const lastTwo = parts.slice(-2).join(".");
-  if (DOUBLE_TLDS.has(lastTwo)) return parts.slice(-3).join(".");
-  return lastTwo;
-}
-
-function _isUnknownDomain(requestHost) {
-  const pageHost = location.hostname.toLowerCase();
-  const pageRoot = _getRootDomain(pageHost);
-  const reqRoot = _getRootDomain(String(requestHost || "").toLowerCase());
-  return Boolean(reqRoot) && reqRoot !== pageRoot;
-}
-
-function _hasSuspiciousEndpoint(urlObj) {
-  if (!urlObj) return false;
-  const hay = `${urlObj.pathname || ""} ${urlObj.search || ""}`.toLowerCase();
-  const markers = [
-    "/support", "/tech-support", "/wallet", "/seed",
-    "bitcoin", "crypto", "verify", "urgent", "claim", "gift",
-  ];
-  return markers.some(m => hay.includes(m));
-}
-
-function _isSuspiciousNetworkTarget(urlObj) {
-  if (!urlObj) return false;
-  return _isUnknownDomain(urlObj.hostname) || _hasSuspiciousEndpoint(urlObj);
-}
-
-function _sendNetworkAlert(requestUrl, reason = "unknown-domain") {
-  if (_networkAlertSeen.size >= _MAX_NETWORK_ALERTS) return;
-  const key = String(requestUrl || "").slice(0, 180);
-  if (_networkAlertSeen.has(key)) return;
-  _networkAlertSeen.add(key);
-  try {
-    chrome.runtime.sendMessage({
-      type: "NETWORK_ALERT",
-      url: requestUrl,
-      reason,
-      pageUrl: location.href,
-    }).catch(() => {});
-  } catch {}
-}
-
-function installPageNetworkBridge() {
-  if (_pageNetworkBridgeInstalled) return;
-  _pageNetworkBridgeInstalled = true;
-
-  window.addEventListener("message", (event) => {
-    if (event.source !== window) return;
-    const data = event.data;
-    if (!data || data.type !== "SENTINEL_PAGE_NETWORK") return;
-    const u = _safeParseUrl(data.url);
-    if (!u || !_isSuspiciousNetworkTarget(u)) return;
-    const reason = _isUnknownDomain(u.hostname) ? "unknown-domain" : "suspicious-endpoint";
-    _sendNetworkAlert(u.href, reason);
-  });
-
-  try {
-    const script = document.createElement("script");
-    script.textContent = `
-      (() => {
-        if (window.__sentinel_page_net_hook_installed) return;
-        window.__sentinel_page_net_hook_installed = true;
-        const emit = (url, method) => {
-          try {
-            if (!url) return;
-            const abs = new URL(String(url), location.href).href;
-            window.postMessage({ type: "SENTINEL_PAGE_NETWORK", url: abs, method: method || "" }, "*");
-          } catch {}
-        };
-        try {
-          const originalFetch = window.fetch;
-          if (typeof originalFetch === "function") {
-            window.fetch = function(...args) {
-              try {
-                const req = args[0];
-                const u = (typeof req === "string" || req instanceof URL) ? String(req) : (req && req.url ? String(req.url) : "");
-                emit(u, "fetch");
-              } catch {}
-              return originalFetch.apply(this, args);
-            };
-          }
-        } catch {}
-        try {
-          const xOpen = XMLHttpRequest.prototype.open;
-          XMLHttpRequest.prototype.open = function(method, url, ...rest) {
-            try { emit(url, method || "xhr"); } catch {}
-            return xOpen.call(this, method, url, ...rest);
-          };
-        } catch {}
-      })();
-    `;
-    (document.documentElement || document.head || document.body).appendChild(script);
-    script.remove();
-  } catch {}
-}
-
-function installNetworkMonitor() {
-  if (_networkMonitorInstalled) return;
-  if (["chrome-extension:", "chrome:", "about:"].includes(location.protocol)) return;
-  _networkMonitorInstalled = true;
-  installPageNetworkBridge();
-
-  // fetch() monitor
-  try {
-    const origFetch = window.fetch;
-    if (typeof origFetch === "function") {
-      window.fetch = function (...args) {
-        try {
-          const u = _safeParseUrl(args[0]);
-          if (u && _isSuspiciousNetworkTarget(u)) {
-            const reason = _isUnknownDomain(u.hostname) ? "unknown-domain" : "suspicious-endpoint";
-            _sendNetworkAlert(u.href, reason);
-          }
-        } catch {}
-        return origFetch.apply(this, args);
-      };
-    }
-  } catch {}
-
-  // XMLHttpRequest monitor
-  try {
-    const OrigXHR = window.XMLHttpRequest;
-    if (OrigXHR && OrigXHR.prototype) {
-      const origOpen = OrigXHR.prototype.open;
-      OrigXHR.prototype.open = function (method, url, ...rest) {
-        try {
-          const u = _safeParseUrl(url);
-          if (u && _isSuspiciousNetworkTarget(u)) {
-            const reason = _isUnknownDomain(u.hostname) ? "unknown-domain" : "suspicious-endpoint";
-            _sendNetworkAlert(u.href, reason);
-          }
-        } catch {}
-        return origOpen.call(this, method, url, ...rest);
-      };
-    }
-  } catch {}
-
-  // Initial external scripts already present on page
-  try {
-    const initialScripts = Array.from(document.querySelectorAll("script[src]")).slice(0, 50);
-    for (const s of initialScripts) {
-      const src = s.getAttribute("src");
-      const u = _safeParseUrl(src);
-      if (u && _isSuspiciousNetworkTarget(u)) {
-        const reason = _isUnknownDomain(u.hostname) ? "unknown-domain" : "suspicious-endpoint";
-        _sendNetworkAlert(u.href, reason);
-      }
-    }
-  } catch {}
-
-  // external script loads (DOM)
-  try {
-    const obs = new MutationObserver((mutations) => {
-      for (const m of mutations) {
-        for (const node of m.addedNodes || []) {
-          if (!(node instanceof HTMLElement)) continue;
-          const scripts = node.tagName === "SCRIPT" ? [node] : Array.from(node.querySelectorAll?.("script[src]") || []);
-          for (const s of scripts) {
-            const src = s.getAttribute("src");
-            if (!src) continue;
-            const u = _safeParseUrl(src);
-            if (u && _isSuspiciousNetworkTarget(u)) {
-              const reason = _isUnknownDomain(u.hostname) ? "unknown-domain" : "suspicious-endpoint";
-              _sendNetworkAlert(u.href, reason);
-            }
-          }
-        }
-      }
-    });
-    obs.observe(document.documentElement, { childList: true, subtree: true });
-  } catch {}
-}
-
-(function initNetworkMonitor() {
-  installNetworkMonitor();
-})();
-
-// ══════════════════════════════════════════════════════════════════════
-// SECTION 12 — RUNTIME SCRIPT SANDBOXING
-// ══════════════════════════════════════════════════════════════════════
-//
-// Intercepts dangerous runtime APIs to detect:
-//   1. Obfuscated eval() calls — long code or code using atob()
-//   2. External script injection — <script src> pointing off-domain
-//   3. Suspicious fetch() targets — URL paths matching attack patterns
-//
-// Architecture note:
-//   The eval hook runs in the MAIN world (injected via <script> tag) so it
-//   intercepts the real window.eval before page scripts see it.
-//   It communicates back via postMessage using a per-load nonce token,
-//   identical to the behaviorMonitor.js probe pattern.
-//   All final signal dispatch goes through reportSignal() → BEHAVIOR_ALERT.
-//
-// False-positive guards:
-//   • Safe domains (google.com, christuniversity.in, etc.) skip all hooks
-//   • eval size threshold: >1000 chars (minified bundles are common & benign)
-//   • External scripts on the same root domain are NOT flagged
-//   • Rate limit: max 5 sandboxing alerts per page load
-
-// ── Guard: skip sandboxing on safe/extension pages ────────────────────
-if (
-  !["chrome-extension:", "chrome:", "about:"].includes(location.protocol) &&
-  !["google.com", "youtube.com", "microsoft.com", "christuniversity.in",
-    "github.com", "gstatic.com", "doubleclick.net", "googletagmanager.com",
-  ].some(d => location.hostname === d || location.hostname.endsWith(`.${d}`))
-) {
-
-  // ── Nonce token for MAIN-world ↔ isolated-world postMessage ──────────
-  const _SANDBOX_TOKEN = `sentinel-sandbox-${Math.random().toString(36).slice(2)}`;
-
-  // ── Rate limiter ──────────────────────────────────────────────────────
-  const _sandboxAlertCounts = Object.create(null);
-  const _SANDBOX_RATE_LIMITS = {
-    obfuscated_script:        3,
-    external_script_injection: 5,
-    suspicious_network_call:  4,
-  };
-
-  function _sandboxRateLimited(signal) {
-    _sandboxAlertCounts[signal] = (_sandboxAlertCounts[signal] || 0) + 1;
-    return _sandboxAlertCounts[signal] > (_SANDBOX_RATE_LIMITS[signal] ?? 3);
-  }
-
-  /**
-   * Reports a runtime sandboxing signal to background.js via BEHAVIOR_ALERT.
-   * Mirrors the reportBehavior() API in behaviorMonitor.js.
-   *
-   * @param {string} signal  — machine-readable signal identifier
-   * @param {object} [details] — optional metadata
-   */
-  function reportSignal(signal, details = {}) {
-    if (_sandboxRateLimited(signal)) return;
-
-    console.warn(`[Sentinel-Sandbox] 🚨 Signal detected: ${signal}`, details);
-
-    try {
-      chrome.runtime.sendMessage({
-        type:       "BEHAVIOR_ALERT",
-        event:      signal,
-        severity:   signal === "obfuscated_script" ? "high" : "medium",
-        confidence: signal === "external_script_injection" ? "HIGH" : "MEDIUM",
-        userInitiated: false,
-        url:        location.href,
-        details:    { ...details, domain: location.hostname },
-        timestamp:  Date.now(),
-      }).catch(() => {});
-    } catch {
-      // Extension context invalidated — best effort only.
-    }
-  }
-
-  // ── 1. EVAL HOOK (MAIN world, via injected <script>) ─────────────────
-  // We inject this into the MAIN world so it wraps window.eval before any
-  // page script runs.  Communicates back via postMessage with _SANDBOX_TOKEN.
-  (function installEvalHook() {
-    const probeCode = `
-(function(TOKEN) {
+(function () {
   "use strict";
 
+  const OVERLAY_ID = "sx-overlay";
+  const PILL_ID = "__sx_pill__";
+  let currentData = null;
+  let __sxAudioCtx__ = null;
+  let __sxAlarmNodes__ = [];
 
+  // Helper: Format scan time as "Scanned just now" or "Scanned 2 mins ago"
+  function formatScanTime(timestamp) {
+    const now = Date.now();
+    const diff = Math.floor((now - timestamp) / 1000);
+    if (diff < 10) return "Scanned just now";
+    if (diff < 60) return `Scanned ${diff}s ago`;
+    const mins = Math.floor(diff / 60);
+    if (mins < 60) return `Scanned ${mins}m ago`;
+    const hours = Math.floor(mins / 60);
+    return `Scanned ${hours}h ago`;
+  }
 
+  const style = document.createElement("style");
+  style.textContent = `
+    #sx-overlay {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      width: 280px;
+      border-radius: 14px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 13px;
+      z-index: 2147483647;
+      overflow: hidden;
+      transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.18), 0 2px 8px rgba(0,0,0,0.12);
+      backdrop-filter: blur(20px) saturate(180%);
+      -webkit-backdrop-filter: blur(20px) saturate(180%);
+      border: 0.5px solid rgba(255,255,255,0.18);
+    }
+    #sx-overlay.sx-safe { background: rgba(10, 42, 24, 0.96); border-left: 3px solid #34d399; }
+    #sx-overlay.sx-uncertain { background: rgba(42, 28, 8, 0.96); border-left: 3px solid #fbbf24; }
+    #sx-overlay.sx-danger { background: rgba(42, 8, 8, 0.96); border-left: 3px solid #f87171; }
+    #sx-overlay.sx-scanning { background: rgba(20, 20, 24, 0.96); border-left: 3px solid #6b7280; }
+    #sx-header { display: flex; align-items: center; gap: 8px; padding: 12px 14px 10px; cursor: pointer; user-select: none; }
+    #sx-status-icon { width: 20px; height: 20px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; font-size: 11px; font-weight: 700; }
+    .sx-safe #sx-status-icon { background: #34d399; color: #022c1a; }
+    .sx-uncertain #sx-status-icon { background: #fbbf24; color: #451a03; }
+    .sx-danger #sx-status-icon { background: #f87171; color: #450a0a; }
+    .sx-scanning #sx-status-icon { background: #6b7280; color: #fff; }
+    #sx-title-block { flex: 1; min-width: 0; }
+    #sx-title { font-size: 13px; font-weight: 600; color: #ffffff; margin: 0; line-height: 1.3; }
+    #sx-subtitle { font-size: 11px; color: rgba(255,255,255,0.6); margin: 1px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #sx-close { color: rgba(255,255,255,0.4); cursor: pointer; font-size: 16px; line-height: 1; padding: 2px 4px; border-radius: 4px; flex-shrink: 0; }
+    #sx-close:hover { color: rgba(255,255,255,0.8); background: rgba(255,255,255,0.1); }
+    #sx-body { max-height: 0; overflow: hidden; transition: max-height 0.3s cubic-bezier(0.4,0,0.2,1); }
+    #sx-overlay.expanded #sx-body { max-height: 500px; }
+    #sx-divider { height: 0.5px; background: rgba(255,255,255,0.12); margin: 0 14px; }
+    #sx-stats { display: flex; padding: 10px 14px; gap: 0; }
+    .sx-stat { flex: 1; }
+    .sx-stat-label { font-size: 10px; color: rgba(255,255,255,0.45); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 3px; }
+    .sx-stat-value { font-size: 18px; font-weight: 700; color: #ffffff; line-height: 1; }
+    .sx-safe .sx-stat-value { color: #34d399; }
+    .sx-uncertain .sx-stat-value { color: #fbbf24; }
+    .sx-danger .sx-stat-value { color: #f87171; }
+    #sx-bar-track { height: 3px; background: rgba(255,255,255,0.1); border-radius: 2px; margin: 0 14px 10px; overflow: hidden; }
+    #sx-bar-fill { height: 100%; border-radius: 2px; transition: width 1s ease-out; }
+    .sx-safe #sx-bar-fill { background: #34d399; }
+    .sx-uncertain #sx-bar-fill { background: #fbbf24; }
+    .sx-danger #sx-bar-fill { background: #f87171; }
+    #sx-signals { padding: 4px 14px 8px; display: flex; flex-direction: column; gap: 5px; }
+    .sx-signal-row { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: rgba(255,255,255,0.75); }
+    .sx-signal-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .dot-green { background: #34d399; }
+    .dot-amber { background: #fbbf24; }
+    .dot-red { background: #f87171; }
+    #sx-pills { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 14px 10px; }
+    .sx-pill { font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 20px; letter-spacing: 0.03em; }
+    .sx-safe .sx-pill { background: rgba(52,211,153,0.15); color: #34d399; border: 0.5px solid rgba(52,211,153,0.3); }
+    .sx-uncertain .sx-pill { background: rgba(251,191,36,0.15); color: #fbbf24; border: 0.5px solid rgba(251,191,36,0.3); }
+    .sx-danger .sx-pill { background: rgba(248,113,113,0.15); color: #f87171; border: 0.5px solid rgba(248,113,113,0.3); }
+    #sx-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 6px 14px 14px; }
+    .sx-btn { padding: 7px 4px; font-size: 11px; font-weight: 500; border-radius: 8px; border: 0.5px solid rgba(255,255,255,0.15); background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.85); cursor: pointer; text-align: center; transition: background 0.15s; }
+    .sx-btn:hover { background: rgba(255,255,255,0.15); }
+    .sx-btn.primary { background: rgba(52,211,153,0.2); border-color: rgba(52,211,153,0.4); color: #34d399; }
+    .sx-btn.primary:hover { background: rgba(52,211,153,0.3); }
+    #sx-branding { padding: 6px 14px 10px; font-size: 9.5px; color: rgba(255,255,255,0.25); text-align: center; letter-spacing: 0.04em; }
+    @keyframes sx-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .sx-scanning #sx-title { animation: sx-pulse 1.5s ease-in-out infinite; }
+    @keyframes __sx_pulse__ { 0%,100%{opacity:1;} 50%{opacity:.3;} }
+  `;
+  document.head.appendChild(style);
 
-// Fallback for potentially undefined functions
-if (!window.console) window.console = { error: () => {}, warn: () => {}, log: () => {} };
-if (!window.chrome) window.chrome = {};
-if (!window.chrome.runtime) window.chrome.runtime = {
-  sendMessage: async (msg) => { console.warn('[Sentinel] chrome.runtime unavailable'); return {}; },
-  getURL: (path) => path,
-  onMessage: { addListener: () => {} }
-};
+  function escapeHtml(str) {
+    return String(str || "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// GLOBAL ERROR HANDLING - Content Script
-// ═══════════════════════════════════════════════════════════════════════════
-
-window.addEventListener('error', (event) => {
-  console.error('[Sentinel] Content script error:', event.error);
-  event.preventDefault();
-}, true);
-
-window.addEventListener('unhandledrejection', (event) => {
-  console.error('[Sentinel] Content script promise rejection:', event.reason);
-  event.preventDefault();
-});
-
-  if (window.__sentinel_eval_hooked) return;
-  window.__sentinel_eval_hooked = true;
-
-  const _originalEval = window.eval;
-  window.eval = function sentinelEval(code) {
+  function playAlarmOnce(status) {
     try {
-      const src = String(code || "");
-      // Flag if: code is very large (>1000 chars) OR uses atob() for obfuscation
-      if (src.length > 1000 || src.includes("atob(")) {
-        try {
-          window.postMessage({
-            _sentinelSandbox: TOKEN,
-            signal: "obfuscated_script",
-            details: {
-              codeLength: src.length,
-              hasAtob: src.includes("atob("),
-              preview: src.slice(0, 120),
-            },
-          }, "*");
-        } catch {}
+      stopAlarm();
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      __sxAudioCtx__ = new AudioCtx();
+      const ctx = __sxAudioCtx__;
+
+      const notes = status === "malicious"
+        ? [{ freq: 880, start: 0, dur: 0.18 }, { freq: 880, start: 0.22, dur: 0.18 }, { freq: 1100, start: 0.44, dur: 0.28 }]
+        : [{ freq: 520, start: 0, dur: 0.20 }, { freq: 520, start: 0.28, dur: 0.20 }];
+
+      notes.forEach(({ freq, start, dur }) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = status === "malicious" ? "square" : "sine";
+        osc.frequency.setValueAtTime(freq, ctx.currentTime);
+        gain.gain.setValueAtTime(0.35, ctx.currentTime + start);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(ctx.currentTime + start);
+        osc.stop(ctx.currentTime + start + dur + 0.05);
+        __sxAlarmNodes__.push(osc, gain);
+      });
+    } catch (e) {}
+  }
+
+  function stopAlarm() {
+    try {
+      __sxAlarmNodes__.forEach(n => { try { n.disconnect(); } catch (_) {} });
+      __sxAlarmNodes__ = [];
+      if (__sxAudioCtx__) {
+        __sxAudioCtx__.close();
+        __sxAudioCtx__ = null;
       }
-    } catch {}
-    return _originalEval.call(this, code);
+    } catch (_) {}
+  }
+
+  function buildOverlayHTML(data) {
+    const score = Math.round(data.score || 0);
+    const domain = data.domain || location.hostname;
+    const signals = (data.signals || []).slice(0, 4);
+    const reasons = Array.isArray(data.reasons) ? data.reasons : [];
+    const trustLevel = data.trustLevel || (score < 30 ? "HIGH" : score < 60 ? "MEDIUM" : "LOW");
+    const scanMs = data.scanMs || 0;
+    const confidence = Math.round(Number(data.confidence ?? data.aiConfidence ?? 0) || 0);
+    const timestamp = data.timestamp || Date.now();
+    const scanTimeString = formatScanTime(timestamp);
+    const statusIcon = score >= 80 ? "✕" : score >= 30 ? "⚠" : "✓";
+
+    const COLOR = score >= 80 ? "#ff3d57" : score >= 30 ? "#ffb830" : "#00c896";
+    const PILL_TXT = score >= 80 ? "BLOCKED" : score >= 60 ? "DANGER" : score >= 30 ? "WARNING" : "SAFE";
+    const TRUST_W = score >= 80 ? "12%" : score >= 30 ? "45%" : "88%";
+
+    const PILL_BG = score >= 80 ? "rgba(255,61,87,.18)"
+      : score >= 30 ? "rgba(255,184,48,.12)"
+      : "rgba(0,200,150,.12)";
+    const PILL_BDR = score >= 80 ? "rgba(255,61,87,.35)"
+      : score >= 30 ? "rgba(255,184,48,.28)"
+      : "rgba(0,200,150,.28)";
+
+    const threatLevel = score <= 20 ? "LOW"
+      : score <= 50 ? "MODERATE"
+        : score <= 75 ? "HIGH"
+          : "CRITICAL";
+    const threatColor = score <= 20 ? "#00c896"
+      : score <= 50 ? "#ffb830"
+        : score <= 75 ? "#ff8a00"
+          : "#ff3d57";
+    const threatBadgeBG = score <= 20 ? "rgba(0,200,150,.12)"
+      : score <= 50 ? "rgba(255,184,48,.12)"
+        : score <= 75 ? "rgba(255,138,0,.12)"
+          : "rgba(255,61,87,.12)";
+    const threatBadgeBDR = score <= 20 ? "rgba(0,200,150,.25)"
+      : score <= 50 ? "rgba(255,184,48,.25)"
+        : score <= 75 ? "rgba(255,138,0,.25)"
+          : "rgba(255,61,87,.3)";
+
+    const confColor = confidence >= 85 ? "#00c896"
+      : confidence >= 60 ? "#ffb830"
+        : "#ff3d57";
+    const confPillBG = confidence >= 85 ? "rgba(0,200,150,.12)"
+      : confidence >= 60 ? "rgba(255,184,48,.12)"
+        : "rgba(255,61,87,.12)";
+    const confPillBDR = confidence >= 85 ? "rgba(0,200,150,.25)"
+      : confidence >= 60 ? "rgba(255,184,48,.28)"
+        : "rgba(255,61,87,.28)";
+
+    const extractSignalText = function (item) {
+      if (typeof item === "string") return item;
+      if (item && typeof item.name === "string") return item.name;
+      if (item && typeof item.description === "string") return item.description;
+      return "";
+    };
+    const keySignalsSource = reasons.length ? reasons : signals;
+    const keySignals = keySignalsSource.slice(0, 3)
+      .map(extractSignalText)
+      .filter(Boolean);
+    // Key-signal chips are intentionally amber/red to visually stand out.
+    const chipBG = score >= 80 ? "rgba(255,61,87,.12)"
+      : "rgba(255,184,48,.12)";
+    const chipBDR = score >= 80 ? "rgba(255,61,87,.28)"
+      : "rgba(255,184,48,.25)";
+    const chipC = score >= 80 ? "#ff3d57"
+      : "#ffb830";
+    const chipsHTML = keySignals.length ? (
+      "<div style=\"margin-bottom:8px;\">"
+      + "<div style=\"font-size:9px;letter-spacing:.12em;color:rgba(255,255,255,.28);text-transform:uppercase;margin-bottom:4px;\">Key signals</div>"
+      + "<div style=\"display:flex;flex-wrap:wrap;gap:6px;\">"
+      + keySignals.map(function (t) {
+        return "<div style=\"display:inline-flex;align-items:center;gap:5px;padding:4px 8px;border-radius:999px;"
+          + "background:" + chipBG + ";border:1px solid " + chipBDR + ";color:" + chipC + ";font-size:10px;font-weight:600;\">"
+          + "<span style=\"font-size:11px;line-height:1;\">&#9888;</span>"
+          + "<span style=\"color:rgba(255,255,255,.92);font-weight:600;\">" + escapeHtml(t) + "</span>"
+          + "</div>";
+      }).join("")
+      + "</div></div>"
+    ) : "";
+    const lowConfidenceLine = confidence < 60
+      ? "<div style=\"font-size:9px;color:rgba(255,255,255,.78);border-left:2px solid #ff3d57;padding:5px 8px;border-radius:4px;margin-bottom:8px;background:rgba(255,61,87,.08);\">Low confidence — result may be inaccurate</div>"
+      : "";
+
+    // FIX 5 — Status-based overlay messaging (safe/suspicious/malicious) with emoji icons
+    let HEADING = "";
+    let SUBHEADING = "";
+    let ADVICE = "";
+
+    if (data.status === "malicious") {
+      HEADING = "✕ Threat detected";
+      SUBHEADING = "This page has been flagged as potentially malicious";
+      ADVICE = "This site has been blocked. Do not proceed — maximum threat signals detected.";
+    } else if (data.status === "suspicious") {
+      HEADING = "⚠ Suspicious page detected";
+      SUBHEADING = "This page shows potential risk signals — proceed with caution";
+      ADVICE = "Suspicious signals found. Verify this URL carefully before interacting.";
+    } else {
+      // Safe (should not reach here due to FIX 4, but included for completeness)
+      HEADING = "✓ Page secure";
+      SUBHEADING = "No threats detected";
+      ADVICE = "No threats detected. This site has a clean reputation and valid HTTPS.";
+    }
+
+    // Legacy fallback to score-based messaging if status not provided
+    if (!data.status) {
+      ADVICE = score >= 80
+        ? "This site has been blocked. Do not proceed — maximum threat signals detected."
+        : score >= 60
+          ? "High risk. Do not enter passwords, card numbers, or personal data on this page."
+          : score >= 30
+            ? "Suspicious signals found. Verify this URL carefully before interacting."
+            : "No threats detected. This site has a clean reputation and valid HTTPS.";
+    }
+
+    const ADVICE_BG = score >= 80 ? "rgba(255,61,87,.07)"
+      : score >= 30 ? "rgba(255,184,48,.07)"
+      : "rgba(0,200,150,.07)";
+
+    const arcOffset = Math.round(75 - (score / 100) * 75);
+    const arcSVG = "<svg width=\"54\" height=\"32\" viewBox=\"0 0 54 32\">"
+      + "<path d=\"M5 29 A24 24 0 0 1 49 29\" fill=\"none\" stroke=\"rgba(255,255,255,0.07)\" stroke-width=\"8\" stroke-linecap=\"round\"/>"
+      + "<path d=\"M5 29 A24 24 0 0 1 49 29\" fill=\"none\" stroke=\"" + COLOR + "\" stroke-width=\"8\" stroke-linecap=\"round\" stroke-dasharray=\"75\" stroke-dashoffset=\"" + arcOffset + "\"/>"
+      + "</svg>";
+
+    const sigHTML = signals.map(function (s) {
+      const wt = s.weight || 0;
+      const dotC = wt >= 30 ? "#ff3d57" : wt >= 15 ? "#ffb830" : "#00c896";
+      const desc = s.description ? " — " + escapeHtml(s.description.slice(0, 55)) : "";
+      return "<div style=\"display:flex;align-items:flex-start;gap:6px;font-size:10.5px;color:rgba(255,255,255,.65);line-height:1.4;margin-bottom:3px;\">"
+        + "<div style=\"width:5px;height:5px;border-radius:50%;background:" + dotC + ";flex-shrink:0;margin-top:4px;\"></div>"
+        + "<span>" + escapeHtml(s.name || "") + desc + "</span>"
+        + "</div>";
+    }).join("");
+
+    let btnsHTML = "";
+    // FIX 5 — Button layout based on status (not just score), add 'Report as safe' for suspicious
+    if (data.status === "malicious" || score >= 80) {
+      btnsHTML = "<button id=\"sentinelReportBtn\" type=\"button\" style=\"flex:1;padding:7px 6px;border-radius:5px;font-size:10.5px;font-weight:500;text-align:center;cursor:pointer;background:rgba(0,200,150,.14);color:#00c896;border:0;\">Generate report</button>"
+        + "<div id=\"__sx_dismiss__\" style=\"flex:1;padding:7px 6px;border-radius:5px;font-size:9.5px;font-weight:500;text-align:center;cursor:pointer;background:rgba(255,255,255,.06);color:rgba(255,255,255,.3);\">Override (unsafe)</div>";
+    } else if (data.status === "suspicious" || score >= 30) {
+      btnsHTML = "<button id=\"sentinelLeaveBtn\" type=\"button\" style=\"flex:1;padding:7px 6px;border-radius:5px;font-size:10.5px;font-weight:500;text-align:center;cursor:pointer;background:rgba(255,61,87,.15);color:#ff3d57;border:1px solid rgba(255,61,87,.3);\">Leave now</button>"
+        + "<button id=\"sentinelReportBtn\" type=\"button\" style=\"flex:1;padding:7px 6px;border-radius:5px;font-size:10.5px;font-weight:500;text-align:center;cursor:pointer;background:#00e5ff;color:#0a0e1a;border:0;\">Full report</button>"
+        + "<button id=\"sentinelSafeBtn\" type=\"button\" style=\"flex:1;padding:7px 6px;border-radius:5px;font-size:9.5px;font-weight:500;text-align:center;cursor:pointer;background:rgba(0,200,150,.15);color:#00c896;border:0;\">Report as safe</button>";
+    } else {
+      btnsHTML = "<div id=\"__sx_dismiss__\" style=\"flex:1;padding:7px 6px;border-radius:5px;font-size:10.5px;font-weight:500;text-align:center;cursor:pointer;background:rgba(255,255,255,.07);color:rgba(255,255,255,.55);\">Dismiss</div>"
+        + "<button id=\"sentinelReportBtn\" type=\"button\" style=\"flex:1;padding:7px 6px;border-radius:5px;font-size:10.5px;font-weight:500;text-align:center;cursor:pointer;background:rgba(0,200,150,.14);color:#00c896;border:0;\">Full report</button>";
+    }
+
+    return "<div style=\"height:3px;background:" + COLOR + ";\"></div>"
+      + "<div style=\"padding:12px 14px;\">"
+      + "<div style=\"display:flex;align-items:center;gap:7px;margin-bottom:10px;\">"
+      + "<svg width=\"14\" height=\"14\" viewBox=\"0 0 14 14\" fill=\"none\"><path d=\"M7 1L2 3.5V7c0 2.6 1.8 5 5 5.7 3.2-.7 5-3.1 5-5.7V3.5L7 1z\" fill=\"" + COLOR + "\" fill-opacity=\".18\" stroke=\"" + COLOR + "\" stroke-width=\"1\"/></svg>"
+      + "<span style=\"font-size:11px;font-weight:700;letter-spacing:.08em;color:#00e5ff;\">" + statusIcon + " SENTINELX</span>"
+      + "<span id=\"sentinelWhyBtn\" style=\"cursor:pointer;font-size:12px;color:#00e5ff;margin-left:auto;padding:2px 6px;border-radius:4px;background:rgba(0,229,255,.08);border:1px solid rgba(0,229,255,.2);position:relative;\" title=\"Why am I seeing this?\">?<span id=\"sentinelWhyTip\" style=\"display:none;position:absolute;right:0;top:20px;z-index:2;width:220px;background:#0d1117;border:1px solid rgba(255,255,255,.18);padding:8px;border-radius:6px;color:rgba(255,255,255,.85);font-size:10px;line-height:1.4;\">This overlay appeared because the confidence score was too low to confirm this page is safe. SentinelX defaults to caution when uncertain.</span></span>"
+      + "<span style=\"font-size:9px;padding:2px 6px;border-radius:99px;font-weight:600;background:" + PILL_BG + ";color:" + COLOR + ";border:1px solid " + PILL_BDR + ";\">" + PILL_TXT + "</span>"
+      + (data.policyBadge ? "<span style=\"font-size:9px;padding:2px 6px;border-radius:99px;font-weight:600;background:rgba(0,229,255,.12);color:#00e5ff;border:1px solid rgba(0,229,255,.3);\">Managed by your organisation</span>" : "")
+      + "</div>"
+      + "<div style=\"font-size:9px;color:rgba(255,255,255,.45);margin-top:-6px;margin-bottom:10px;\">Advanced Cyber Protection</div>"
+      + "<div style=\"display:flex;align-items:center;gap:10px;margin-bottom:8px;\">"
+      + arcSVG
+      + "<div><div style=\"font-size:28px;font-weight:700;font-family:monospace;color:" + COLOR + ";line-height:1;\">" + score + "</div>"
+      + "<div style=\"font-size:9px;letter-spacing:.1em;color:" + COLOR + ";margin-top:2px;\">" + PILL_TXT + " · " + trustLevel + " TRUST</div></div>"
+      + "</div>"
+      + "<div style=\"font-size:10.5px;font-family:monospace;color:rgba(255,255,255,.55);background:rgba(255,255,255,.04);padding:4px 8px;border-radius:4px;margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;\">" + escapeHtml(domain) + "</div>"
+      + "<div style=\"margin-bottom:8px;\">"
+      + "<div style=\"display:flex;align-items:center;gap:8px;margin-bottom:6px;\">"
+      + "<span style=\"font-size:9px;letter-spacing:.08em;color:rgba(255,255,255,.28);\">Threat level</span>"
+      + "<span style=\"font-size:10px;font-weight:800;padding:2px 7px;border-radius:99px;background:" + threatBadgeBG + ";color:" + threatColor + ";border:1px solid " + threatBadgeBDR + ";\">" + escapeHtml(threatLevel) + "</span>"
+      + "</div>"
+      + "<div style=\"display:flex;align-items:center;gap:10px;\">"
+      + "<div style=\"flex:1;height:4px;background:rgba(255,255,255,.07);border-radius:2px;overflow:hidden;\">"
+      + "<div style=\"height:100%;width:" + Math.max(0, Math.min(100, score)) + "%;border-radius:2px;background:" + threatColor + ";\"></div>"
+      + "</div>"
+      + "<div style=\"font-size:10px;font-weight:800;color:" + threatColor + ";white-space:nowrap;\">" + score + " / 100</div>"
+      + "</div></div>"
+      + "<div style=\"display:flex;align-items:center;gap:7px;margin-bottom:8px;\">"
+      + "<span style=\"font-size:9px;letter-spacing:.08em;color:rgba(255,255,255,.28);\">TRUST</span>"
+      + "<div style=\"flex:1;height:3px;background:rgba(255,255,255,.07);border-radius:2px;\">"
+      + "<div style=\"width:" + TRUST_W + ";height:100%;border-radius:2px;background:" + COLOR + ";\"></div></div>"
+      + "<span style=\"font-size:10px;font-weight:600;color:" + COLOR + ";\">" + trustLevel + "</span>"
+      + "</div>"
+      + "<div style=\"display:flex;align-items:center;gap:7px;margin-bottom:8px;\">"
+      + "<span style=\"font-size:9px;letter-spacing:.08em;color:rgba(255,255,255,.28);\">CONFIDENCE</span>"
+      + "<span style=\"margin-left:auto;font-size:10px;font-weight:800;color:" + confColor + ";background:" + confPillBG + ";border:1px solid " + confPillBDR + ";padding:2px 7px;border-radius:99px;\">" + confidence + "%</span>"
+      + "</div>"
+      + lowConfidenceLine
+      + chipsHTML
+      + (sigHTML ? "<div style=\"margin-bottom:8px;\">" + sigHTML + "</div>" : "")
+      + "<div style=\"font-size:10.5px;line-height:1.55;color:rgba(255,255,255,.6);border-left:2px solid " + COLOR + ";padding:5px 8px;margin-bottom:9px;background:" + ADVICE_BG + ";\">" + escapeHtml(ADVICE) + "</div>"
+      + "<div style=\"display:flex;gap:6px;margin-bottom:2px;\">" + btnsHTML + "</div>"
+      + "<div style=\"font-size:9px;color:rgba(255,255,255,.28);margin-top:8px;display:flex;justify-content:space-between;\">"
+      + "<span>" + scanTimeString + " · Confidence " + confidence + "%</span>"
+      + "<span style=\"display:flex;gap:10px;align-items:center;\">"
+      + "<span id=\"__sx_mute__\" class=\"sx-mute-btn\" style=\"color:rgba(255,255,255,.75);cursor:pointer;\">Mute sound</span>"
+      + "<span id=\"__sx_dash__\" style=\"color:#00e5ff;cursor:pointer;\">Dashboard</span>"
+      + "</span>"
+      + "</div>"
+      + "</div>";
+  }
+
+  function sxSetScanning() {
+    const overlay = document.getElementById("sx-overlay");
+    if (!overlay) return;
+    overlay.classList.remove("sx-safe", "sx-uncertain", "sx-danger");
+    overlay.classList.add("sx-scanning");
+    const title = document.getElementById("sx-title");
+    if (title) title.textContent = "Scanning…";
+  }
+
+  function sxBindButtons() {
+    const btnScan = document.getElementById("sx-btn-scan");
+    if (btnScan) {
+      btnScan.addEventListener("click", (e) => {
+        e.stopPropagation();
+        chrome.runtime.sendMessage({
+          type: "SENTINEL_RESCAN",
+          action: "SENTINEL_RESCAN",
+          url: location.href,
+          tabId: null,
+          forceDeep: true
+        });
+        sxSetScanning();
+      });
+    }
+
+    const btnMute = document.getElementById("sx-btn-mute");
+    if (btnMute) {
+      btnMute.addEventListener("click", (e) => {
+        e.stopPropagation();
+        chrome.storage.local.get(["sx_sound_muted"], (data) => {
+          const nowMuted = !data.sx_sound_muted;
+          chrome.storage.local.set({ sx_sound_muted: nowMuted });
+          btnMute.textContent = nowMuted ? "🔔 Unmute" : "🔕 Mute sound";
+          btnMute.style.opacity = nowMuted ? "0.5" : "1";
+          if (nowMuted) stopAlarm();
+        });
+      });
+    }
+
+    const btnTrust = document.getElementById("sx-btn-trust");
+    if (btnTrust) {
+      btnTrust.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const host = location.hostname;
+        chrome.storage.local.get(["sx_trusted_domains"], (data) => {
+          const trusted = data.sx_trusted_domains || [];
+          if (!trusted.includes(host)) trusted.push(host);
+          chrome.storage.local.set({ sx_trusted_domains: trusted });
+          btnTrust.textContent = "✓ Trusted!";
+          btnTrust.style.background = "rgba(52,211,153,0.3)";
+          btnTrust.style.borderColor = "rgba(52,211,153,0.6)";
+          setTimeout(() => {
+            btnTrust.textContent = "✓ I trust this";
+            btnTrust.style.background = "";
+            btnTrust.style.borderColor = "";
+          }, 2000);
+        });
+      });
+    }
+
+    const btnReport = document.getElementById("sx-btn-report");
+    if (btnReport) {
+      btnReport.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const reportUrl = chrome.runtime.getURL("report/report.html") + "?url=" + encodeURIComponent(location.href);
+        window.open(reportUrl, "_blank");
+      });
+    }
+
+    const header = document.getElementById("sx-header");
+    if (header) {
+      header.addEventListener("click", (e) => {
+        if (e.target.id === "sx-close" || (e.target.closest && e.target.closest("#sx-close"))) return;
+        const overlay = document.getElementById("sx-overlay");
+        if (overlay) overlay.classList.toggle("expanded");
+      });
+    }
+
+    const btnClose = document.getElementById("sx-close");
+    if (btnClose) {
+      btnClose.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const overlay = document.getElementById("sx-overlay");
+        if (overlay) overlay.style.display = "none";
+      });
+    }
+  }
+
+  function getConfidenceLabel(score, confidence) {
+    if (confidence >= 80) return { text: confidence + "%", note: "" };
+    if (confidence >= 50) return { text: confidence + "%", note: "Moderate certainty" };
+    if (score >= 40 && confidence < 30) {
+      return {
+        text: confidence + "%",
+        note: "⚠ Low confidence — signals detected but source data limited. Treat as indicative."
+      };
+    }
+    return { text: confidence + "%", note: "Insufficient data — result may be inaccurate" };
+  }
+
+  function getOverlayTier(status, score, confidence) {
+    // Never show malicious/suspicious if confidence is critically low
+    // AND score is not extreme
+    if (confidence < 25 && score < 65) return "uncertain";
+    if (status === "malicious" || score >= 70) return "malicious";
+    if (status === "suspicious" && score >= 35 && confidence >= 40) {
+      return "suspicious";
+    }
+    if (status === "safe" && confidence >= 30) return "safe";
+    return "uncertain";
+  }
+
+  const OVERLAY_TIER_CONFIG = {
+    safe: {
+      icon: "✔",
+      color: "#22c55e",
+      headline: "Site looks safe",
+      subtext: (domain) => `${domain} passed our security checks.`,
+      cta: null,
+      playSound: false
+    },
+    uncertain: {
+      icon: "?",
+      color: "#94a3b8",
+      headline: "Limited scan data",
+      /** Body lines are resolved in showOverlay via uncertainBody (confidence-based). */
+      subtext: () => "",
+      cta: "Rescan page",
+      playSound: false
+    },
+    suspicious: {
+      icon: "⚠",
+      color: "#f59e0b",
+      headline: "Suspicious signals detected",
+      subtext: (domain) => `${domain} shows some risk indicators. Proceed carefully.`,
+      cta: "View full report",
+      playSound: true
+    },
+    malicious: {
+      icon: "✕",
+      color: "#ef4444",
+      headline: "Threat detected",
+      subtext: (domain) => `${domain} has been flagged as dangerous.`,
+      cta: "Leave this page",
+      playSound: true
+    },
   };
-  // Preserve toString() so feature-detection doesn't break
-  window.eval.toString = () => _originalEval.toString();
-})(${JSON.stringify(_SANDBOX_TOKEN)});
-`.trim();
 
-    try {
-      const script = document.createElement("script");
-      script.textContent = probeCode;
-      (document.head || document.documentElement).appendChild(script);
-      script.remove();
-    } catch {
-      // CSP blocks inline script injection — eval hook unavailable on this origin.
-      console.debug("[Sentinel-Sandbox] eval hook blocked by CSP");
+  const DOMAIN_CATEGORIES = {
+    "nykaa.com": "Indian beauty & skincare marketplace",
+    "myntra.com": "Indian fashion marketplace",
+    "1mg.com": "Licensed online pharmacy",
+    "pharmeasy.in": "Licensed online pharmacy",
+    "practo.com": "Healthcare consultation platform",
+    "apollopharmacy.in": "Apollo healthcare",
+    "cult.fit": "Fitness & wellness platform",
+    "healthifyme.com": "Diet & fitness platform",
+    "chatgpt.com": "AI platform",
+    "openai.com": "AI research platform",
+    "flipkart.com": "Indian e-commerce",
+    "amazon.in": "Global e-commerce",
+    "mamaearth.in": "Natural skincare brand",
+    "beminimalist.co": "Skincare brand",
+    "cerave.com": "Dermatologist skincare",
+    "healthline.com": "Health information",
+    "mayoclinic.org": "Medical reference",
+    "webmd.com": "Health information",
+  };
+
+  function getDomainCategory(hostname) {
+    const host = String(hostname || "").toLowerCase();
+    for (const [domain, category] of Object.entries(DOMAIN_CATEGORIES)) {
+      if (host === domain || host.endsWith("." + domain)) return category;
     }
-  })();
+    return null;
+  }
 
-  // ── Relay: receive postMessage signals from MAIN world eval hook ──────
-  window.addEventListener("message", (event) => {
-    if (event.source !== window) return;
-    if (!event.data || event.data._sentinelSandbox !== _SANDBOX_TOKEN) return;
+  function getCategoryTags(result, category) {
+    const map = {
+      "Indian beauty & skincare marketplace": ["Beauty", "Skincare", "E-Commerce", "India", "Verified"],
+      "Licensed online pharmacy": ["Healthcare", "Pharmacy", "India", "Licensed", "Verified"],
+      "Healthcare consultation platform": ["Healthcare", "Doctors", "India", "Verified"],
+      "Fitness & wellness platform": ["Fitness", "Wellness", "India", "Verified"],
+      "AI platform": ["AI", "Technology", "Global", "Verified"],
+      "Indian e-commerce": ["Shopping", "E-Commerce", "India", "Verified"],
+    };
+    return map[category] || ["Verified", "Trusted"];
+  }
 
-    const { signal, details } = event.data;
-    if (signal && typeof signal === "string") {
-      reportSignal(signal, details || {});
+  function showOverlay(data) {
+    const canonical = globalThis.normalizeSentinelResult
+      ? globalThis.normalizeSentinelResult(data)
+      : data;
+
+    removeOverlay();
+    currentData = canonical;
+    window.__sx_current_status__ = canonical.status;
+    const currentHost = canonical.domain || location.hostname;
+    const category = getDomainCategory(currentHost);
+    const tags = getCategoryTags(canonical, category);
+    const score = Math.max(0, Math.min(100, Number(canonical.score || 0)));
+    const confidence = Math.max(0, Math.min(100, Math.round(Number(canonical.confidence || 0))));
+    const status = String(canonical.status || "safe").toLowerCase();
+    let stateClass = "sx-safe";
+    let icon = "✓";
+    let title = "Site looks safe";
+    if (status === "uncertain" || status === "suspicious") {
+      stateClass = "sx-uncertain";
+      icon = "!";
+      title = "Proceed with care";
+    } else if (status === "danger" || status === "blocked" || status === "malicious") {
+      stateClass = "sx-danger";
+      icon = "✕";
+      title = "Site may be dangerous";
     }
-  }, { passive: true });
 
-  // ── 2. EXTERNAL SCRIPT INJECTION OBSERVER ────────────────────────────
-  // Watches for dynamically injected <script src="..."> elements where
-  // the src points to a different root domain than the current page.
-  // This catches post-load script injection (XSS, supply-chain attacks).
-  (function installScriptInjectionObserver() {
-    const pageRoot = _getRootDomain(location.hostname.toLowerCase());
+    const html = `<div id="sx-overlay" class="${stateClass}">
+      <div id="sx-header">
+        <div id="sx-status-icon">${icon}</div>
+        <div id="sx-title-block">
+          <div id="sx-title">${title}</div>
+          <div id="sx-subtitle">${escapeHtml(currentHost)}${category ? ` — ${escapeHtml(category)}` : ""}</div>
+        </div>
+        <div id="sx-close">×</div>
+      </div>
+      <div id="sx-body">
+        <div id="sx-divider"></div>
+        <div id="sx-stats">
+          <div class="sx-stat"><div class="sx-stat-label">Threat score</div><div class="sx-stat-value" id="sx-score">${Math.round(score)}/100</div></div>
+          <div class="sx-stat"><div class="sx-stat-label">Confidence</div><div class="sx-stat-value" id="sx-conf">${confidence}%</div></div>
+        </div>
+        <div id="sx-bar-track"><div id="sx-bar-fill" style="width:0%"></div></div>
+        <div id="sx-divider"></div>
+        <div id="sx-signals">
+          <div class="sx-signal-row"><div class="sx-signal-dot dot-green"></div>SSL encrypted & HSTS verified</div>
+          <div class="sx-signal-row"><div class="sx-signal-dot dot-green"></div>Verified trusted domain</div>
+          <div class="sx-signal-row"><div class="sx-signal-dot dot-green"></div>${Math.max(0, (canonical.signals || []).length)} threat signals detected</div>
+          <div class="sx-signal-row"><div class="sx-signal-dot dot-green"></div>Safe payment gateway detected</div>
+        </div>
+        <div id="sx-divider"></div>
+        <div id="sx-pills">${tags.map((tag) => `<span class="sx-pill">${escapeHtml(tag)}</span>`).join("")}</div>
+        <div id="sx-divider"></div>
+        <div id="sx-actions">
+          <div class="sx-btn primary" id="sx-btn-scan">↺ Scan again</div>
+          <div class="sx-btn" id="sx-btn-mute">🔕 Mute sound</div>
+          <div class="sx-btn" id="sx-btn-trust">✓ I trust this</div>
+          <div class="sx-btn" id="sx-btn-report">↗ Full report</div>
+        </div>
+        <div id="sx-branding">SENTINELX · ADVANCED CYBER PROTECTION</div>
+      </div>
+    </div>`;
 
-    function checkScriptNode(node) {
-      if (!(node instanceof HTMLScriptElement)) return;
-      const src = node.getAttribute("src");
-      if (!src) return; // inline scripts are handled by the eval hook
+    document.body.insertAdjacentHTML("beforeend", html);
+    sxBindButtons();
+    const fill = document.getElementById("sx-bar-fill");
+    setTimeout(() => { if (fill) fill.style.width = `${score}%`; }, 50);
+    chrome.storage.local.get("sx_sound_muted", (res) => {
+      const btn = document.getElementById("sx-btn-mute");
+      if (btn) btn.textContent = res && res.sx_sound_muted ? "🔔 Unmute sound" : "🔕 Mute sound";
+    });
 
-      const u = _safeParseUrl(src);
-      if (!u) return;
-
-      const srcRoot = _getRootDomain(u.hostname.toLowerCase());
-      // Same root domain → legitimate (CDN subdomains, etc.)
-      if (srcRoot && srcRoot === pageRoot) return;
-      // Relative URL with no hostname → same origin → safe
-      if (!u.hostname) return;
-
-      reportSignal("external_script_injection", {
-        src: src.slice(0, 200),
-        srcDomain: u.hostname,
-        pageDomain: location.hostname,
+    if (stateClass !== "sx-safe") {
+      chrome.storage.local.get("sx_sound_muted", (res) => {
+        if (!res.sx_sound_muted) playAlarmOnce(stateClass === "sx-danger" ? "malicious" : "suspicious");
       });
     }
-
-    const scriptObserver = new MutationObserver((mutations) => {
-      for (const { addedNodes } of mutations) {
-        for (const node of addedNodes) {
-          if (node instanceof HTMLScriptElement) {
-            checkScriptNode(node);
-          } else if (node instanceof HTMLElement) {
-            // Check descendant scripts (e.g., injected document fragment)
-            node.querySelectorAll?.("script[src]")
-              .forEach(s => checkScriptNode(s));
-          }
+    if (canonical.status === "safe") {
+      setTimeout(() => {
+        const overlay = document.getElementById("sx-overlay");
+        if (overlay && !overlay.classList.contains("expanded")) {
+          overlay.style.opacity = "0.85";
         }
-      }
-    });
-
-    scriptObserver.observe(document.documentElement, {
-      childList: true,
-      subtree:   true,
-    });
-
-    // Scan scripts already present at injection time
-    document.querySelectorAll("script[src]")
-      .forEach(s => checkScriptNode(s));
-  })();
-
-  // ── 3. SUSPICIOUS FETCH PATTERN MONITOR ──────────────────────────────
-  // Supplements Section 11's network monitor with signal-specific detection:
-  // catches fetch() calls whose URL string contains known attack path patterns
-  // even when the domain itself looks clean (e.g. exfil via legit CDN).
-  (function installSuspiciousFetchMonitor() {
-    const _SUSPICIOUS_FETCH_PATTERNS = [
-      "bitcoin", "crypto", "wallet", "seed-phrase",
-      "exfil", "c2", "beacon",
-      "/cmd", "/shell", "/exec",
-    ];
-
-    // Operate in isolated world — window.fetch here is the page's real fetch
-    // (the MAIN-world hook in Section 11 already exists; this isolated-world
-    // wrapper only adds the signal-specific path check without duplicating
-    // the base network monitor logic).
-    try {
-      const _origFetchForSandbox = window.fetch;
-      if (typeof _origFetchForSandbox === "function" &&
-          !window.__sentinel_sandbox_fetch_hooked) {
-        window.__sentinel_sandbox_fetch_hooked = true;
-
-        window.fetch = function (...args) {
-          try {
-            const rawUrl = typeof args[0] === "string"
-              ? args[0]
-              : (args[0] instanceof URL ? args[0].href : (args[0]?.url || ""));
-            const urlLower = rawUrl.toLowerCase();
-
-            if (_SUSPICIOUS_FETCH_PATTERNS.some(p => urlLower.includes(p))) {
-              reportSignal("suspicious_network_call", {
-                url:     rawUrl.slice(0, 200),
-                pattern: _SUSPICIOUS_FETCH_PATTERNS.find(p => urlLower.includes(p)),
-              });
-            }
-          } catch {}
-          return _origFetchForSandbox.apply(this, args);
-        };
-      }
-    } catch {
-      // fetch unavailable or already non-writable — skip
+      }, 6000);
     }
-  })();
+  }
 
-} // end safe-domain guard
+  function showScanningPill(labelText) {
+    const txt = labelText || "SentinelX scanning…";
+    const existing = document.getElementById("__sx_scanning__");
+    if (existing) {
+      const label = existing.querySelector(".__sx_scanning_label__");
+      if (label) label.textContent = txt;
+      return;
+    }
+    const pill = document.createElement("div");
+    pill.id = "__sx_scanning__";
+    pill.style.cssText = `
+      position:fixed;bottom:20px;right:20px;z-index:2147483647;
+      background:#0d1220;border:1.5px solid #3a5f8a;border-radius:20px;
+      color:#7ab3e0;font-family:-apple-system,sans-serif;font-size:12px;
+      padding:6px 14px;display:flex;align-items:center;gap:6px;
+      box-shadow:0 4px 16px rgba(0,0,0,0.4);
+    `;
+    pill.innerHTML =
+      `<span style="width:7px;height:7px;border-radius:999px;background:#7ab3e0;animation:__sx_pulse__ 1s infinite;"></span>` +
+      `<span class="__sx_scanning_label__">${escapeHtml(txt)}</span>`;
+    document.body.appendChild(pill);
+  }
 
-const SENTINEL_FORCE_TEST_MODE = true;
+  function removeScanningPill() {
+    const el = document.getElementById("__sx_scanning__");
+    if (el) el.remove();
+  }
 
-function initSentinel() {
-  console.log("[Sentinel] Detection started");
-  if (!SENTINEL_FORCE_TEST_MODE) return;
-  window.addEventListener("load", () => {
-    setTimeout(() => {
-      showOverlay({
-        risk: 80,
-        reason: "TEST ALERT - SYSTEM CHECK"
+  function showPill(data) {
+    removePill();
+    var score = Math.round(data.score || 0);
+    var color = score >= 80 ? "#ff3d57" : score >= 30 ? "#ffb830" : "#00c896";
+    var label = score >= 80 ? "BLOCKED" : score >= 30 ? "WARNING" : "SAFE";
+    var pill = document.createElement("div");
+    pill.id = PILL_ID;
+    pill.style.cssText = "position:fixed!important;bottom:18px!important;right:18px!important;"
+      + "background:#0d1117!important;border-radius:99px!important;"
+      + "border:1px solid rgba(255,255,255,0.14)!important;"
+      + "padding:5px 12px 5px 8px!important;display:flex!important;"
+      + "align-items:center!important;gap:6px!important;"
+      + "font-family:Inter,system-ui,sans-serif!important;"
+      + "z-index:2147483647!important;cursor:pointer!important;";
+    pill.innerHTML = "<span style=\"font-size:11px;font-weight:700;font-family:monospace;color:" + color + ";\">" + score + "</span>"
+      + "<span style=\"font-size:10px;color:rgba(255,255,255,.5);\">" + label + "</span>"
+      + "<span style=\"font-size:10px;color:rgba(255,255,255,.25);\">×</span>";
+    pill.addEventListener("click", function () {
+      removePill();
+      showOverlay(currentData || data);
+    });
+    document.body.appendChild(pill);
+  }
+
+  function removeOverlay() {
+    var el = document.getElementById(OVERLAY_ID);
+    if (el) el.remove();
+    stopAlarm();
+  }
+
+  function removePill() {
+    var el = document.getElementById(PILL_ID);
+    if (el) el.remove();
+  }
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    const action = message && (message.action || message.type);
+    switch (action) {
+      case "SENTINEL_SCANNING": {
+        const overlay = document.getElementById("sx-overlay");
+        if (!overlay) break;
+        const body = document.getElementById("sx-title");
+        const scoreEl = document.getElementById("sx-score");
+        if (body) body.textContent = message.text || "Rescanning…";
+        if (scoreEl) scoreEl.textContent = "…";
+        // Add a subtle pulse animation class while scanning
+        overlay.classList.remove("sx-safe", "sx-uncertain", "sx-danger");
+        overlay.classList.add("sx-scanning");
+        sendResponse({ ok: true });
+        return true;
+      }
+      case "SENTINEL_SHOW_OVERLAY": {
+      const incoming = globalThis.normalizeSentinelResult
+        ? globalThis.normalizeSentinelResult(message.data || {})
+        : message.data;
+      const severityRank = { safe: 0, suspicious: 1, malicious: 2 };
+      const currentStatus = window.__sx_current_status__ || "safe";
+      if (severityRank[incoming.status] >= severityRank[currentStatus]) {
+        window.__sx_current_status__ = incoming.status;
+        const existingOverlay = document.getElementById("sx-overlay");
+        if (existingOverlay) existingOverlay.classList.remove("sx-scanning");
+        removeScanningPill();
+        removePill();
+        showOverlay(incoming);
+      }
+      sendResponse({ ok: true });
+        break;
+      }
+      default:
+        break;
+    }
+    return false;
+  });
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function () {
+      showScanningPill();
+    });
+  } else {
+    showScanningPill();
+  }
+
+  setTimeout(function () {
+    chrome.runtime.sendMessage({ type: "GET_CURRENT_TAB_ID" }, function (response) {
+      var tabId = response && response.tabId ? response.tabId : null;
+      chrome.runtime.sendMessage({ type: "GET_TAB_ANALYSIS", tabId: tabId }, function (result) {
+        if (result) {
+          const canonical = globalThis.normalizeSentinelResult
+            ? globalThis.normalizeSentinelResult(result)
+            : result;
+          removeScanningPill();
+          removeOverlay();
+          showOverlay(canonical);
+          return;
+        }
+        if (!tabId) return;
+        chrome.runtime.sendMessage(
+          { type: "TRIGGER_ANALYSIS", url: location.href, tabId: tabId },
+          function () { if (chrome.runtime.lastError) {} }
+        );
       });
-    }, 1500);
-  }, { once: true });
-}
-
-try {
-  initSentinel();
-} catch (err) {
-  console.error("[Sentinel Fatal Error]", err);
-}
+    });
+  }, 800);
+})();

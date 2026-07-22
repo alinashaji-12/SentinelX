@@ -164,7 +164,7 @@ const COOLDOWN_CONFIG = {
   },
   "suspicious": {
     enabled: true,
-    duration: 5000,      // 5 seconds
+    duration: 60000,      // FIX 7: 60 seconds (not 5s) — suppress duplicate suspicious on same domain only
   },
   "safe": {
     enabled: false,      // Don't alert on safe
@@ -667,6 +667,13 @@ function evaluateThreat(result, context = {}) {
       severity = "malicious";
     } else if (finalRisk >= RISK_THRESHOLDS.suspicious) {
       severity = "suspicious";
+    }
+
+    // FIX 7 — Respect SUSPICIOUS from detectionEngine as first-class state
+    // If detectionEngine already classified as suspicious, ensure we don't downgrade it
+    if (baseStatus === "suspicious" && severity === "safe") {
+      severity = "suspicious";
+      debugInfo.suspiciousFromDetectionEngine = true;
     }
 
     // ───────────────────────────────────────────────────────────────
